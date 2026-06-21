@@ -17,7 +17,7 @@ on:
 
 jobs:
   e2e-vmaas:
-    uses: ./.github/workflows/e2e-vault-secrets.yml
+    uses: ./.github/workflows/e2e.yml
     with:
       test-suite: ${{ github.event.inputs.test-suite || 'vmaas' }}
       test-filter: ${{ github.event.inputs.test-filter || '' }}
