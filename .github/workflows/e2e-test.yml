@@ -15,6 +15,10 @@ on:
         required: false
         default: ""
 
+concurrency:
+  group: e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   e2e-vmaas:
     uses: ./.github/workflows/e2e.yml
