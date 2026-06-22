@@ -139,16 +139,36 @@ jobs:
             exit 1
           fi
 
-          # --- Pull cluster flavor if missing ---
-          # Check whether the flavor already exists on this server.
-          # Only pull (under exclusive lock) when it's absent.
+          # --- Pull cluster flavor if missing or outdated ---
+          # Compare the remote image digest with the locally stored one.
+          # Pull (under exclusive lock) only when the flavor is absent or
+          # the remote image has been updated since the last pull.
+          DIGEST_FILE="/tmp/cluster-tool-flavor-${FLAVOR_NAME}.digest"
+          REMOTE_DIGEST=$(skopeo inspect "docker://${FLAVOR_IMAGE}" --format '{{.Digest}}' 2>/dev/null || echo "")
+          LOCAL_DIGEST=""
+          if [[ -f "${DIGEST_FILE}" ]]; then
+            LOCAL_DIGEST=$(cat "${DIGEST_FILE}")
+          fi
+
           if sudo python3 /usr/local/bin/cluster-tool flavors \
                | grep -q "^${FLAVOR_NAME} "; then
-            echo "Flavor '${FLAVOR_NAME}' already present — skipping pull."
+            if [[ -n "${REMOTE_DIGEST}" ]] && [[ "${REMOTE_DIGEST}" == "${LOCAL_DIGEST}" ]]; then
+              echo "Flavor '${FLAVOR_NAME}' is up to date (digest: ${LOCAL_DIGEST}) — skipping pull."
+            elif [[ -n "${REMOTE_DIGEST}" ]]; then
+              echo "Flavor '${FLAVOR_NAME}' exists but image changed (local: ${LOCAL_DIGEST:-none}, remote: ${REMOTE_DIGEST}) — pulling..."
+              flock --exclusive "${FLAVOR_LOCK}" \
+                sudo python3 /usr/local/bin/cluster-tool pull "${FLAVOR_IMAGE}"
+              echo "${REMOTE_DIGEST}" > "${DIGEST_FILE}"
+            else
+              echo "Flavor '${FLAVOR_NAME}' already present, could not check remote digest — skipping pull."
+            fi
           else
             echo "Flavor '${FLAVOR_NAME}' not found — pulling..."
             flock --exclusive "${FLAVOR_LOCK}" \
               sudo python3 /usr/local/bin/cluster-tool pull "${FLAVOR_IMAGE}"
+            if [[ -n "${REMOTE_DIGEST}" ]]; then
+              echo "${REMOTE_DIGEST}" > "${DIGEST_FILE}"
+            fi
           fi
 
           # --- Clean up stale clone resources ---
