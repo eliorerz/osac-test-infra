@@ -159,3 +159,7 @@ echo "============================================"
 echo "  Migration complete"
 echo "  Migrated: ${migrated}  Failed: ${failed}"
 echo "============================================"
+
+if (( failed > 0 )); then
+    exit 1
+fi
