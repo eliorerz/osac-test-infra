@@ -47,12 +47,16 @@ mkdir -p "${VAULT_HOME}"/{config,data,logs,scripts,backups}
 chmod 700 "${VAULT_HOME}"
 
 # The Vault container runs as uid=100(vault) gid=1000(vault).
-# In rootless Podman the user namespace handles UID mapping, so chown
-# is only needed (and only works) when running as root.
+# The data and logs dirs must be owned by that uid/gid within
+# the container's user namespace.
+VAULT_UID=100
+VAULT_GID=1000
 if [[ "${EUID}" -eq 0 ]]; then
-    VAULT_UID=100
-    VAULT_GID=1000
     chown "${VAULT_UID}:${VAULT_GID}" "${VAULT_HOME}/data" "${VAULT_HOME}/logs"
+else
+    # Rootless Podman: chown inside the user namespace so that uid 100
+    # on the host side maps to the correct subordinate UID.
+    podman unshare chown "${VAULT_UID}:${VAULT_GID}" "${VAULT_HOME}/data" "${VAULT_HOME}/logs"
 fi
 
 ###############################################################################
