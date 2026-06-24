@@ -10,6 +10,7 @@
 #
 # Steps (run all if none specified):
 #   packages       Install system packages (libvirt, qemu-kvm, podman, etc.)
+#   runner-user    Create github-runner user with libvirt group and sudo
 #   services       Enable system services (libvirtd, haproxy, podman.socket)
 #   oc             Install OpenShift CLI
 #   osac           Install osac CLI (fulfillment-service)
@@ -34,6 +35,7 @@ set -euo pipefail
 ###############################################################################
 CLUSTER_TOOL_DIR="/opt/cluster-tool"
 CLUSTER_TOOL_BIN="/usr/local/bin/cluster-tool"
+RUNNER_USER="github-runner"
 
 ###############################################################################
 # Parse arguments
@@ -55,7 +57,7 @@ while [[ $# -gt 0 ]]; do
             sed -n '2,/^[^#]/{ /^#/s/^# \?//p }' "$0"
             exit 0
             ;;
-        packages|services|oc|osac|cluster-tool|vault|verify)
+        packages|runner-user|services|oc|osac|cluster-tool|vault|verify)
             STEPS+=("$1")
             shift
             ;;
@@ -69,7 +71,7 @@ done
 
 # Default: run all steps
 if [[ ${#STEPS[@]} -eq 0 ]]; then
-    STEPS=(packages services oc osac cluster-tool vault verify)
+    STEPS=(packages runner-user services oc osac cluster-tool vault verify)
 fi
 
 ###############################################################################
@@ -123,6 +125,59 @@ install_packages() {
 
     # ansible-builder is needed for building AAP execution-environment images
     python3 -m pip install --quiet ansible-builder
+
+    echo "    Done."
+}
+
+###############################################################################
+# Step: runner-user
+###############################################################################
+create_runner_user() {
+    echo "==> Creating ${RUNNER_USER} user..."
+
+    if id "${RUNNER_USER}" &>/dev/null; then
+        echo "    User ${RUNNER_USER} already exists."
+    else
+        useradd -m -s /bin/bash "${RUNNER_USER}"
+        echo "    User ${RUNNER_USER} created."
+    fi
+
+    # Add to libvirt group for VM management
+    if ! id -nG "${RUNNER_USER}" | grep -qw libvirt; then
+        usermod -aG libvirt "${RUNNER_USER}"
+        echo "    Added to libvirt group."
+    fi
+
+    # Allow passwordless sudo (required for virsh, haproxy, etc.)
+    SUDOERS_FILE="/etc/sudoers.d/${RUNNER_USER}"
+    if [[ ! -f "${SUDOERS_FILE}" ]]; then
+        echo "${RUNNER_USER} ALL=(ALL) NOPASSWD: ALL" > "${SUDOERS_FILE}"
+        chmod 0440 "${SUDOERS_FILE}"
+        echo "    Passwordless sudo configured."
+    fi
+
+    # Copy SSH authorized_keys from the current user (if available)
+    RUNNER_HOME=$(eval echo "~${RUNNER_USER}")
+    RUNNER_SSH_DIR="${RUNNER_HOME}/.ssh"
+    mkdir -p "${RUNNER_SSH_DIR}"
+
+    if [[ -f "${HOME}/.ssh/authorized_keys" ]]; then
+        # Append keys, avoiding duplicates
+        if [[ -f "${RUNNER_SSH_DIR}/authorized_keys" ]]; then
+            # Only add keys not already present
+            while IFS= read -r key; do
+                grep -qxF "$key" "${RUNNER_SSH_DIR}/authorized_keys" 2>/dev/null \
+                    || echo "$key" >> "${RUNNER_SSH_DIR}/authorized_keys"
+            done < "${HOME}/.ssh/authorized_keys"
+        else
+            cp "${HOME}/.ssh/authorized_keys" "${RUNNER_SSH_DIR}/authorized_keys"
+        fi
+        echo "    SSH authorized_keys copied."
+    fi
+
+    chown -R "${RUNNER_USER}:${RUNNER_USER}" "${RUNNER_SSH_DIR}"
+    chmod 700 "${RUNNER_SSH_DIR}"
+    chmod 600 "${RUNNER_SSH_DIR}/authorized_keys" 2>/dev/null || true
 
     echo "    Done."
 }
@@ -274,7 +329,9 @@ setup_cluster_tool() {
 
     echo "==> Configuring cluster-tool for local CI mode..."
 
-    CT_CONFIG_DIR="${HOME}/.config/cluster-tool"
+    # Configure under the runner user's home, not root's.
+    RUNNER_HOME=$(eval echo "~${RUNNER_USER}")
+    CT_CONFIG_DIR="${RUNNER_HOME}/.config/cluster-tool"
     mkdir -p "${CT_CONFIG_DIR}"
 
     # Determine data path
@@ -298,8 +355,9 @@ setup_cluster_tool() {
         echo "CLUSTER_TOOL_DATA=${DATA_PATH}" > "${CT_CONFIG_DIR}/config"
     fi
 
-    # Create data directories
+    # Create data directories and ensure runner user owns them
     mkdir -p "${DATA_PATH}/flavors" "${DATA_PATH}/overlays" "${DATA_PATH}/tmp" "${DATA_PATH}/containers/storage"
+    chown -R "${RUNNER_USER}:${RUNNER_USER}" "${DATA_PATH}"
 
     # Generate SSH keypair for cluster-tool (used for VM access)
     if [[ ! -f "${CT_CONFIG_DIR}/cluster-tool.key" ]]; then
@@ -310,7 +368,7 @@ setup_cluster_tool() {
     fi
 
     # Configure podman parallel downloads (faster OCI image pulls)
-    CONTAINERS_CONF="${HOME}/.config/containers/containers.conf"
+    CONTAINERS_CONF="${RUNNER_HOME}/.config/containers/containers.conf"
     mkdir -p "$(dirname "${CONTAINERS_CONF}")"
     if [[ ! -f "${CONTAINERS_CONF}" ]]; then
         cat > "${CONTAINERS_CONF}" <<'EOF'
@@ -330,6 +388,10 @@ EOF
     else
         echo "    Server registry already exists."
     fi
+
+    # Fix ownership of all config created under the runner user's home
+    chown -R "${RUNNER_USER}:${RUNNER_USER}" "${CT_CONFIG_DIR}"
+    chown -R "${RUNNER_USER}:${RUNNER_USER}" "$(dirname "${CONTAINERS_CONF}")"
 
     # DNS setup for local mode: cluster-tool creates dnsmasq entries
     # in /etc/NetworkManager/dnsmasq.d/ for cluster DNS resolution
@@ -420,6 +482,13 @@ run_verify() {
         (( failures++ )) || true
     fi
 
+    if id "${RUNNER_USER}" &>/dev/null; then
+        printf "  %-20s %s\n" "${RUNNER_USER}:" "exists (groups: $(id -nG "${RUNNER_USER}"))"
+    else
+        printf "  %-20s FAILED — user not found\n" "${RUNNER_USER}:"
+        (( failures++ )) || true
+    fi
+
     if [[ -n "${DATA_PATH}" ]]; then
         echo ""
         AVAIL=$(df -h "${DATA_PATH}" 2>/dev/null | tail -1 | awk '{print $4}')
@@ -437,6 +506,7 @@ run_verify() {
 # Run selected steps
 ###############################################################################
 should_run packages      && install_packages
+should_run runner-user   && create_runner_user
 should_run services      && enable_services
 should_run oc            && install_oc
 should_run osac          && install_osac
