@@ -11,7 +11,8 @@
 #   7.  Enable KV v2 secrets engine at secret/
 #   8.  Enable and configure JWT auth (GitHub OIDC)
 #   9.  Create osac-e2e policy and role
-#  10.  Enable loginctl linger, enable vault.service + backup timer
+#  10.  Enable AppRole auth, write role-id/secret-id to ~/.vault-server/.approle/
+#  11.  Enable loginctl linger, enable vault.service + backup timer
 #
 # Prerequisites:
 #   - podman, jq, vault CLI installed
@@ -216,9 +217,43 @@ ROLE
 echo "Role 'osac-e2e' created (bound to osac-project org + e2e-test environment, 60m TTL)."
 
 ###############################################################################
-# Phase 10: Enable linger, enable services
+# Phase 10: Enable AppRole auth and write credentials
 ###############################################################################
-phase 10 "Enabling loginctl linger and systemd services"
+phase 10 "Configuring AppRole auth for GitHub Actions runners"
+
+if vault auth list -format=json 2>/dev/null | jq -e '."approle/"' >/dev/null 2>&1; then
+    echo "AppRole auth already enabled -- skipping."
+else
+    vault auth enable approle
+    echo "AppRole auth enabled."
+fi
+
+# Create (or update) the osac-e2e AppRole role
+vault write auth/approle/role/osac-e2e \
+    token_policies="osac-e2e" \
+    token_ttl=10m \
+    token_max_ttl=30m \
+    secret_id_num_uses=0 \
+    secret_id_ttl=0
+
+# Fetch role-id and generate a secret-id
+APPROLE_DIR="${VAULT_HOME}/.approle"
+mkdir -p "${APPROLE_DIR}"
+
+ROLE_ID=$(vault read -field=role_id auth/approle/role/osac-e2e/role-id)
+SECRET_ID=$(vault write -field=secret_id -f auth/approle/role/osac-e2e/secret-id)
+
+echo "${ROLE_ID}"  > "${APPROLE_DIR}/role-id"
+echo "${SECRET_ID}" > "${APPROLE_DIR}/secret-id"
+chmod 700 "${APPROLE_DIR}"
+chmod 600 "${APPROLE_DIR}/role-id" "${APPROLE_DIR}/secret-id"
+
+echo "AppRole credentials written to ${APPROLE_DIR}/"
+
+###############################################################################
+# Phase 11: Enable linger, enable services
+###############################################################################
+phase 11 "Enabling loginctl linger and systemd services"
 
 loginctl enable-linger "$(whoami)" 2>/dev/null || true
 
