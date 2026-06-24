@@ -385,7 +385,10 @@ EOF
         echo "    Server registry already exists."
     fi
 
-    # Fix ownership of all config created under the runner user's home
+    # Fix ownership of all config created under the runner user's home.
+    # Chown ~/.config itself (not just subdirs) so rootless podman doesn't
+    # complain about parent directory ownership.
+    chown "${RUNNER_USER}:${RUNNER_USER}" "${RUNNER_HOME}/.config"
     chown -R "${RUNNER_USER}:${RUNNER_USER}" "${CT_CONFIG_DIR}"
     chown -R "${RUNNER_USER}:${RUNNER_USER}" "$(dirname "${CONTAINERS_CONF}")"
 
