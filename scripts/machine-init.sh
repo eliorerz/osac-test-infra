@@ -246,8 +246,26 @@ HAPROXY_EOF
     systemctl enable --now haproxy
     systemctl restart haproxy
 
+    # Protect sshd from OOM killer so the machine stays reachable
+    # even when VMs or runners exhaust memory.
+    mkdir -p /etc/systemd/system/sshd.service.d
+    cat > /etc/systemd/system/sshd.service.d/oom-protect.conf <<'SSHD_OOM_EOF'
+[Service]
+OOMScoreAdjust=-1000
+SSHD_OOM_EOF
+    systemctl daemon-reload
+    systemctl restart sshd
+    echo "    sshd OOM protection enabled (OOMScoreAdjust=-1000)."
+
     # Podman socket for GitHub Actions (docker compatibility)
     systemctl enable --now podman.socket
+
+    # Persistent journal (survives reboots for post-mortem debugging)
+    mkdir -p /var/log/journal
+    systemd-tmpfiles --create --prefix /var/log/journal
+    sed -i 's/^#\?Storage=.*/Storage=persistent/' /etc/systemd/journald.conf
+    systemctl restart systemd-journald
+    echo "    Persistent journal enabled."
 
     echo "    Done."
 }
