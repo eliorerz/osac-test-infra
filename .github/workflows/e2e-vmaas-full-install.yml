@@ -324,7 +324,7 @@ jobs:
             exit 1
           fi
 
-          COMPONENT_TAG="component-pr:${GITHUB_RUN_ID}"
+          COMPONENT_TAG="localhost/component-pr:${GITHUB_RUN_ID}"
 
           echo "Cloning ${COMPONENT_REPO}@${COMPONENT_REF}..."
           git clone --depth 1 --branch "${COMPONENT_REF}" \
