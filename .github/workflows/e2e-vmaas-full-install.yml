@@ -287,7 +287,7 @@ jobs:
       - name: Build test image
         env:
           E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"
-        run: podman build -t "${E2E_IMAGE}" -f Containerfile .
+        run: podman build --no-cache -t "${E2E_IMAGE}" -f Containerfile .
 
       - name: Build and load component image
         if: inputs.component-repo != ''
