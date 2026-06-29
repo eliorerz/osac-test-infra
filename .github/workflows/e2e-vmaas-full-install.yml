@@ -326,7 +326,7 @@ jobs:
 
           echo "Building image from ${COMPONENT_FILE}..."
           podman build -t "${COMPONENT_TAG}" \
-            -f "${COMPONENT_FILE}" "$RUNNER_TEMP/component-src"
+            -f "$RUNNER_TEMP/component-src/${COMPONENT_FILE}" "$RUNNER_TEMP/component-src"
 
           # Load image onto the cluster node so CRI-O can use it locally.
           # On RHCOS, root podman and CRI-O share /var/lib/containers/storage,
