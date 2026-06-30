@@ -107,6 +107,21 @@ jobs:
       FLAVOR_LOCK: "/tmp/cluster-tool-flavor-${{ inputs.flavor-name }}.lock"
 
     steps:
+      - name: Validate fork PR author
+        if: github.event.pull_request.head.repo.fork == true
+        env:
+          AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+        run: |
+          case "${AUTHOR_ASSOCIATION}" in
+            OWNER|MEMBER|COLLABORATOR|CONTRIBUTOR)
+              echo "PR author association is ${AUTHOR_ASSOCIATION} — allowing fork e2e."
+              ;;
+            *)
+              echo "::error::PR author association is '${AUTHOR_ASSOCIATION}'. Fork PRs require org membership."
+              exit 1
+              ;;
+          esac
+
       - name: Set clone name
         id: clone-name
         env:
