@@ -113,10 +113,31 @@ jobs:
 
     steps:
       - name: Validate fork PR author
-        if: inputs.fork-pr-author-association != ''
         env:
           AUTHOR_ASSOCIATION: ${{ inputs.fork-pr-author-association }}
+          COMPONENT_REPO: ${{ inputs.component-repo }}
+          INSTALLER_REPO: ${{ inputs.installer-repo }}
         run: |
+          # Detect fork repos: any repo input pointing outside osac-project
+          IS_FORK=false
+          for repo in "${COMPONENT_REPO}" "${INSTALLER_REPO}"; do
+            if [[ -n "${repo}" ]] && [[ "${repo}" != osac-project/* ]]; then
+              IS_FORK=true
+              break
+            fi
+          done
+
+          if [[ "${IS_FORK}" != "true" ]]; then
+            echo "No fork repo detected — skipping authorization check."
+            exit 0
+          fi
+
+          # Fork detected — require author_association from the caller
+          if [[ -z "${AUTHOR_ASSOCIATION}" ]]; then
+            echo "::error::Fork repo detected but fork-pr-author-association was not provided. Update the caller workflow."
+            exit 1
+          fi
+
           case "${AUTHOR_ASSOCIATION}" in
             OWNER|MEMBER|COLLABORATOR|CONTRIBUTOR)
               echo "PR author association is ${AUTHOR_ASSOCIATION} — allowing fork e2e."
