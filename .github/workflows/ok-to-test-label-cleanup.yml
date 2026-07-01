@@ -3,18 +3,18 @@ name: Remove ok-to-test on new push
 on:
   pull_request_target:
     types: [synchronize]
-
-permissions:
-  pull-requests: write
+  workflow_call: {}
 
 jobs:
   remove-label:
     if: contains(github.event.pull_request.labels.*.name, 'ok-to-test')
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
       - name: Remove ok-to-test label
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh pr edit ${{ github.event.pull_request.number }} \
             --repo ${{ github.repository }} \
