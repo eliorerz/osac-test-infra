@@ -308,6 +308,12 @@ jobs:
 
           # Build OSAC CLI from source when the component is fulfillment-service
           if [[ "${COMPONENT_REPO}" == *"fulfillment-service"* ]]; then
+            if ! command -v go &>/dev/null; then
+              GO_VERSION=$(grep -oP '^go \K[0-9.]+' "${SRC}/go.mod" || echo "1.24.4")
+              echo "Installing Go ${GO_VERSION}..."
+              curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | sudo tar -C /usr/local -xz
+              export PATH="/usr/local/go/bin:$PATH"
+            fi
             echo "Building osac CLI from source..."
             (cd "${SRC}" && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/osac-cli-bin" ./cmd/osac)
             echo "OSAC_CLI_BIN=$RUNNER_TEMP/osac-cli-bin" >> "$GITHUB_ENV"
