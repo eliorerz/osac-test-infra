@@ -1,0 +1,147 @@
+---
+- name: Clone osac-installer
+  ansible.builtin.git:
+    repo: "{{ osac_installer_repo }}"
+    dest: "{{ osac_installer_dir }}"
+    version: "{{ osac_installer_branch }}"
+    force: true
+  when: not (osac_installer_skip_clone | default(false) | bool)
+
+- name: Initialize submodules
+  ansible.builtin.command:
+    cmd: git submodule update --init --recursive
+    chdir: "{{ osac_installer_dir }}"
+  register: _submodule_update
+  changed_when: _submodule_update.stdout | length > 0
+  when: not (osac_installer_skip_clone | default(false) | bool)
+
+- name: Override osac-operator code in installer
+  ansible.builtin.git:
+    repo: "{{ osac_operator_repo }}"
+    dest: "{{ osac_installer_dir }}/base/osac-operator"
+    version: "{{ osac_operator_branch }}"
+    force: true
+  when:
+    - not (osac_installer_skip_clone | default(false) | bool)
+    - osac_operator_branch | default('') | length > 0
+
+- name: Override fulfillment-service code in installer
+  ansible.builtin.git:
+    repo: "{{ fulfillment_service_repo }}"
+    dest: "{{ osac_installer_dir }}/base/osac-fulfillment-service"
+    version: "{{ fulfillment_service_branch }}"
+    force: true
+  when:
+    - not (osac_installer_skip_clone | default(false) | bool)
+    - fulfillment_service_branch | default('') | length > 0
+
+- name: Rebuild osac CLI from fulfillment-service
+  ansible.builtin.command:
+    cmd: /usr/local/go/bin/go build -o /usr/local/bin/osac ./cmd/osac
+    chdir: "{{ osac_installer_dir }}/base/osac-fulfillment-service"
+  environment:
+    GOPATH: /root/go
+    GOCACHE: /root/.cache/go-build
+  when: not (osac_installer_skip_clone | default(false) | bool)
+
+- name: Determine values directory
+  ansible.builtin.set_fact:
+    _values_dir: "{{ snapshot_osac_values_file | dirname }}"
+
+- name: Ensure values directory exists
+  ansible.builtin.file:
+    path: "{{ osac_installer_dir }}/{{ _values_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Copy AAP license to values directory
+  ansible.builtin.copy:
+    src: "{{ osac_license_path }}"
+    dest: "{{ osac_installer_dir }}/{{ _values_dir }}/license.zip"
+    remote_src: true
+    mode: "0644"
+
+- name: Copy pull-secret to values directory
+  ansible.builtin.copy:
+    src: "{{ pull_secret_path }}"
+    dest: "{{ osac_installer_dir }}/{{ _values_dir }}/pull-secret.json"
+    remote_src: true
+    mode: "0644"
+
+- name: Override fulfillment-service image in values file
+  ansible.builtin.shell:
+    cmd: |
+      sed -i 's|[a-zA-Z0-9./_-]*fulfillment-service:[a-zA-Z0-9._-]*|{{ fulfillment_service_image }}|g' \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+  when: fulfillment_service_image | default('') | length > 0
+
+- name: Override osac-operator image in values file
+  ansible.builtin.shell:
+    cmd: |
+      REPO="{{ osac_operator_image | regex_replace(':[^/]+$', '') }}"
+      TAG="{{ osac_operator_image | regex_search(':[^/]+$') | regex_replace('^:', '') | default('latest', true) }}"
+      sed -i "s|[a-zA-Z0-9./_-]*osac-operator:[a-zA-Z0-9._-]*|{{ osac_operator_image }}|g" \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+      sed -i "/repository: .*osac-operator/{s|repository: .*|repository: ${REPO}|;n;s/tag: .*/tag: ${TAG}/}" \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+  when: osac_operator_image | default('') | length > 0
+
+- name: Override osac-aap image in values file
+  ansible.builtin.shell:
+    cmd: |
+      sed -i 's|[a-zA-Z0-9./_-]*osac-aap:[a-zA-Z0-9._-]*|{{ osac_aap_image }}|g' \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+  when: osac_aap_image | default('') | length > 0
+
+- name: Override AAP project git branch in values file
+  ansible.builtin.shell:
+    cmd: |
+      sed -i 's|projectGitBranch: .*|projectGitBranch: "{{ osac_aap_branch }}"|' \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+  when: osac_aap_branch | default('') | length > 0
+
+- name: Disable osac-ui (image not published yet)
+  ansible.builtin.shell:
+    cmd: |
+      if grep -q 'osac-ui' {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}; then
+        sed -i '/^ui:/,/^[a-z]/{s/enabled: true/enabled: false/}' \
+          {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+      fi
+  changed_when: false
+
+- name: Scale down osac-ui deployment if running
+  ansible.builtin.shell:
+    cmd: oc scale deployment/osac-ui --replicas=0 -n {{ snapshot_osac_namespace }} 2>/dev/null || true
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
+- name: Build list of CI images to pre-pull
+  ansible.builtin.set_fact:
+    _prepull_images: >-
+      {{
+        ([] +
+         ([fulfillment_service_image] if fulfillment_service_image | default('') | length > 0 else []) +
+         ([osac_operator_image] if osac_operator_image | default('') | length > 0 else []) +
+         ([osac_aap_image] if osac_aap_image | default('') | length > 0 else []))
+      }}
+
+- name: Pre-pull CI images onto SNO node
+  ansible.builtin.shell:
+    cmd: >-
+      ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10
+      -i {{ snapshot_flavor_dir }}/crypto/cluster-tool.key
+      core@{{ ocp_dnat_ip }}
+      "sudo crictl pull '{{ item }}'"
+  loop: "{{ _prepull_images }}"
+  loop_control:
+    label: "{{ item.split('/')[-1] }}"
+  register: _prepull_result
+  until: _prepull_result.rc == 0
+  retries: 5
+  delay: 30
+  when: _prepull_images | length > 0
+
+- name: Report OSAC prep completed
+  ansible.builtin.debug:
+    msg: "OSAC prep completed — ready for refresh script"
