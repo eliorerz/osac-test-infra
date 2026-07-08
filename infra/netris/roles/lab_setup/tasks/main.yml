@@ -1,0 +1,82 @@
+---
+- name: Load netris-lab variables
+  ansible.builtin.include_vars:
+    file: "{{ netris_lab_dir }}/group_vars/all.yml"
+
+- name: Pre-flight checks
+  ansible.builtin.include_tasks: "{{ role_path }}/../lab_deploy/tasks/preflight.yml"
+
+- name: Install Ansible collections
+  ansible.builtin.command:
+    cmd: ansible-galaxy collection install -r requirements.yml -p collections
+    chdir: "{{ netris_lab_dir }}"
+  changed_when: false
+
+- name: Run prerequisites
+  ansible.builtin.include_role:
+    name: prerequisites
+
+- name: Cache container and cloud images
+  ansible.builtin.include_role:
+    name: cache
+
+- name: Install OCP and OSAC dependencies
+  ansible.builtin.dnf:
+    name:
+      - podman
+      - dnsmasq
+      - zstd
+      - pigz
+    state: present
+
+- name: Install aicli and awscli
+  ansible.builtin.pip:
+    name:
+      - aicli
+      - awscli
+    state: present
+
+- name: Install oc CLI
+  ansible.builtin.shell:
+    cmd: |
+      curl -fsSL https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/stable/openshift-client-linux.tar.gz \
+        | tar xzf - -C /usr/local/bin oc kubectl
+    creates: /usr/local/bin/oc
+
+- name: Install helm
+  ansible.builtin.command:
+    cmd: bash -c "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+    creates: /usr/local/bin/helm
+
+- name: Install Go toolchain
+  ansible.builtin.shell:
+    cmd: |
+      curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz \
+        | tar xzf - -C /usr/local
+    creates: /usr/local/go/bin/go
+
+- name: Check if fulfillment-service already exists
+  ansible.builtin.stat:
+    path: /opt/fulfillment-service
+  register: _fs_exists
+
+- name: Clone fulfillment-service
+  ansible.builtin.git:
+    repo: "{{ fulfillment_service_repo }}"
+    dest: /opt/fulfillment-service
+    version: "{{ fulfillment_service_branch | default('main', true) }}"
+    force: true
+  when: not _fs_exists.stat.exists
+
+- name: Build osac CLI
+  ansible.builtin.command:
+    cmd: /usr/local/go/bin/go build -o /usr/local/bin/osac ./cmd/osac
+    chdir: /opt/fulfillment-service
+    creates: /usr/local/bin/osac
+  environment:
+    GOPATH: /root/go
+    GOCACHE: /root/.cache/go-build
+
+- name: Cache snapshot flavor image
+  ansible.builtin.include_role:
+    name: snapshot_pull

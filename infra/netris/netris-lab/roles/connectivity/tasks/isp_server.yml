@@ -1,0 +1,48 @@
+---
+# In isolated mode, the host acts as the br-public gateway.
+# Add the gateway IP so the ISP server's default route works,
+# then ensure FRR is installed and running.
+
+- name: Add gateway IP on br-public
+  shell: ip addr add {{ bgp_link_subnet | ansible.utils.ipaddr('network') | ansible.utils.ipmath(1) }}/{{ bgp_link_subnet | ansible.utils.ipaddr('prefix') }} dev {{ public_bridge_name }} 2>/dev/null || true
+  changed_when: false
+
+- name: Route NAT and L4LB pools via ISP server
+  command: ip route replace {{ item }} via {{ bgp_link_subnet | ansible.utils.ipaddr('network') | ansible.utils.ipmath(2) }} dev {{ public_bridge_name }}
+  loop:
+    - "{{ nat_cidr }}"
+    - "{{ l4lb_cidr }}"
+  changed_when: true
+
+- name: Wait for ISP server SSH
+  wait_for:
+    host: 192.168.122.15
+    port: 22
+    timeout: 300
+    sleep: 10
+
+- name: Remove stale SSH host key for ISP server
+  shell: ssh-keygen -R 192.168.122.15 2>/dev/null || true
+  changed_when: false
+
+- name: Check if FRR is running
+  shell: ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@192.168.122.15 "systemctl is-active frr" 2>/dev/null
+  register: isp_frr_check
+  changed_when: false
+  ignore_errors: true
+
+- name: Wait for cloud-init to finish on ISP server
+  when: isp_frr_check.stdout is not defined or isp_frr_check.stdout != "active"
+  shell: ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 root@192.168.122.15 "cloud-init status --wait 2>/dev/null || true"
+  changed_when: false
+
+- name: Install and start FRR on ISP server
+  when: isp_frr_check.stdout is not defined or isp_frr_check.stdout != "active"
+  shell: |
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 root@192.168.122.15 "
+      echo 'Acquire::ForceIPv4 \"true\";' > /etc/apt/apt.conf.d/99force-ipv4
+      apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y frr 2>&1 | tail -3
+      sed -i '/bgpd=no/c\bgpd=yes' /etc/frr/daemons
+      test -f /tmp/frr.conf && cp /tmp/frr.conf /etc/frr/frr.conf
+      systemctl restart frr
+    "

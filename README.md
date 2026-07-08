@@ -1,96 +1,168 @@
 # OSAC Test Infrastructure
 
-End-to-end test suite for OSAC. Tests the full stack: fulfillment CLI/API, operator, AAP provisioning, and KubeVirt VM lifecycle.
+Unified repo for OSAC end-to-end testing. Provisions infrastructure via pluggable backends and runs pytest test suites against it.
 
-## Test Framework
+## Architecture
 
-Tests are written in pytest. The existing Ansible playbooks remain in `playbooks/` and `roles/` for reference during the migration period.
+The repo has two layers:
 
-## Directory Structure
+- **`infra/`** — infrastructure backends that provision a cluster and deploy OSAC. Each backend lives in its own directory and can use any technology (Ansible, shell, Go, etc.).
+- **`tests/`** — pytest E2E test suites that validate OSAC functionality. Tests are infrastructure-agnostic — they consume environment variables and don't know which backend provisioned the cluster.
+
+A **contract** connects the two layers. Each backend implements a standard set of Makefile targets (`setup-infra`, `deploy-infra`, `deploy-osac`, etc.) and produces a `.env.infra` file with the configuration tests need. The top-level Makefile orchestrates the full flow.
 
 ```
-tests/
-├── conftest.py          # Session fixtures: cli, grpc, k8s, k8s_vm
-├── runner.py            # Execution primitives: run, run_unchecked, poll_until, env
-├── k8s_client.py        # K8sClient — kubectl wrapper (hub + VM cluster)
-├── grpc_client.py       # GRPCClient — grpcurl wrapper
-├── osac_cli.py          # OsacCLI — osac CLI wrapper
-└── vmaas/               # VMaaS test suite
-    ├── test_compute_instance_creation.py          # Full VM lifecycle
-    ├── test_compute_instance_delete_during_provision.py  # Delete while provisioning
-    ├── test_compute_instance_restart.py           # Restart via gRPC
-    ├── test_compute_instance_restart_negative.py  # Past timestamp ignored
-    ├── test_compute_instance_api_fields.py        # Mutability/immutability
-    └── test_compute_instance_cli_fields.py        # CLI fields + K8s verification
-playbooks/    # Legacy Ansible tests
-roles/        # Legacy Ansible roles
+infra/<backend>/                    tests/<suite>/
+┌──────────────────────┐            ┌──────────────────────┐
+│ setup-infra          │            │                      │
+│ deploy-infra         │            │ pytest test_*.py     │
+│ deploy-osac ──────────── .env.infra ──▶                │
+│ setup-<suite>        │            │                      │
+│ destroy-osac         │            │                      │
+│ destroy-infra        │            │                      │
+│ gather-infra         │
+│ gather-<suite>       │            │                      │
+└──────────────────────┘            └──────────────────────┘
 ```
+
+### Infrastructure Backends
+
+| Backend | Technology | Description | Deploy Time |
+|---------|-----------|-------------|-------------|
+| **netris** | Ansible | Simulated Netris Spectrum-X GPU cluster with OCP and OSAC on KVM/libvirt | ~25 min (snapshot) / ~2h (full) |
+
+### Test Suites
+
+| Suite | Description |
+|-------|-------------|
+| **vmaas** | Compute instance lifecycle, restart, networking, public IPs, security groups, console, JWT auth |
+| **caas** | Cluster lifecycle, credentials, template immutability, API fields |
+| **catalog** | Catalog item lifecycle |
+| **storage** | Tenant storage lifecycle |
+
+### Compatibility Matrix
+
+Not every backend supports every test suite. Each backend declares its supported suites in a `capabilities` file. The system validates this before any deployment starts.
+
+| Backend | vmaas | caas | catalog | storage |
+|---------|:-----:|:----:|:-------:|:-------:|
+| netris  | no    | yes  | no      | no      |
+
+Running an unsupported combination (e.g., `make e2e INFRA=netris SUITE=storage`) fails immediately with a clear error message — no time wasted on provisioning.
+
+### Backend Setup: Netris
+
+The Netris backend requires the following files placed in `infra/netris/` before running:
+
+| File | Description | How to obtain |
+|------|-------------|---------------|
+| `license.key` | Netris controller license | Obtain from Netris |
+| `license.zip` | OSAC/AAP license (base64-encoded zip) | Obtain from Red Hat |
+| `config` | INI file with lab name and AWS credentials | Create manually (see below) |
+
+The `config` file format:
+
+```ini
+[default]
+lab_name = <unique-name>
+aws_access_key_id = <your-key>
+aws_secret_access_key = <your-secret>
+aws_region = us-east-1
+```
+
+- `lab_name` — unique identifier for your lab to avoid DNS collisions in Route 53
+- AWS credentials — used for Route 53 DNS record management
+
+Additionally, an OCP pull secret must be present at `/root/pull-secret` on the host.
+
+All secret files are gitignored.
+
+## How It Works
+
+When you run `make e2e INFRA=netris SUITE=caas`, the following happens:
+
+1. **Validate** — checks that the `netris` backend exists and supports the `caas` suite
+2. **`setup-infra`** — installs prerequisites, caches images (`ansible-playbook playbooks/setup.yml`)
+3. **`deploy-infra`** — deploys the Netris lab, OCP cluster from snapshot (`make deploy-fast`)
+4. **`deploy-osac`** — refreshes OSAC on the restored cluster, writes `.env.infra` with cluster access credentials
+5. **`setup-suite`** — runs CaaS-specific infrastructure setup (creates InfraEnv, boots discovery VMs, registers agents)
+6. **`run-tests`** — validates `.env.infra` has the required variables, sources it, runs `pytest tests/caas/`
+
+Each step can be run independently — you don't have to run the full pipeline every time.
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.11+
-- `osac` binary (matching the deployed fulfillment-service version)
-- `grpcurl` (Go binary: `go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest`)
-- `oc` / `kubectl` with cluster-admin access
-- A running OSAC deployment
-
-### Install
+### Run tests against an existing cluster
 
 ```bash
 uv sync
+
+OSAC_NAMESPACE=osac-devel OSAC_VM_KUBECONFIG=~/.kube/config make test-vmaas
+
+TEST=test_cluster_order_lifecycle make test-caas
 ```
 
-### Run Tests
+### Full E2E with infrastructure provisioning
 
 ```bash
-# Run VMaaS tests against your cluster
-OSAC_NAMESPACE=osac-devel make test-vmaas
+# Full pipeline: provision + deploy + test
+make e2e INFRA=netris SUITE=caas
 
-# Run a single test by name
-TEST=test_compute_instance_lifecycle make test-vmaas
+# Or step by step
+make setup-infra INFRA=netris
+make deploy-infra INFRA=netris
+make deploy-osac INFRA=netris
+make setup-suite INFRA=netris SUITE=caas
+make run-tests INFRA=netris SUITE=caas
 ```
 
-### Makefile Targets
+### Iterate on OSAC
 
+```bash
+# Redeploy OSAC without reprovisioning the lab
+make redeploy-osac INFRA=netris
+
+# Then re-run tests
+make run-tests INFRA=netris SUITE=caas
 ```
-make test-vmaas
-make lint
-make format
+
+### Tear down
+
+```bash
+make destroy-osac INFRA=netris       # OSAC only, keep the lab
+make destroy-infra INFRA=netris      # Everything
+```
+
+### Gather diagnostics
+
+```bash
+make gather-infra INFRA=netris
+make gather-suite INFRA=netris SUITE=caas
 ```
 
 ## Configuration
 
-All configuration via environment variables. Same vars work in local dev and CI.
+All configuration via environment variables.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OSAC_NAMESPACE` | `osac-devel` | Namespace where OSAC is deployed |
-| `KUBECONFIG` | `~/.kube/config` | Kubeconfig for the hub (management cluster) |
-| `OSAC_VM_KUBECONFIG` | **(required)** | Kubeconfig for the VM cluster (where VirtualMachines run). In single-cluster setups, set this to the same value as `KUBECONFIG`. |
-| `OSAC_FULFILLMENT_ADDRESS` | auto-derived | Fulfillment API address (`host:port`) |
-| `OSAC_VM_TEMPLATE` | `osac.templates.ocp_virt_vm` | ComputeInstance template to use |
-| `OSAC_SERVICE_ACCOUNT` | `admin` | ServiceAccount for token generation |
+| `KUBECONFIG` | `~/.kube/config` | Kubeconfig for the hub cluster |
+| `OSAC_VM_KUBECONFIG` | **(required for vmaas)** | Kubeconfig for the VM cluster |
+| `OSAC_PULL_SECRET_PATH` | **(required for caas)** | Path to OCP pull secret |
+| `OSAC_FULFILLMENT_ADDRESS` | auto-derived | Fulfillment API address |
+| `OSAC_VM_TEMPLATE` | `osac.templates.ocp_virt_vm` | VM template |
+| `OSAC_CLUSTER_TEMPLATE` | `osac.templates.ocp_ci_small` | Cluster template |
 | `OSAC_CLI_PATH` | `osac` | Path to the CLI binary |
-| `TEST` | (none) | pytest `-k` filter — run only tests matching this name substring |
+| `TEST` | (none) | pytest `-k` filter |
+| `INFRA` | `netris` | Infrastructure backend |
+| `SUITE` | `caas` | Test suite |
+| `EXTRA_VARS` | (none) | Extra variables passed to the backend |
 
-### Two-Kubeconfig Design
+## Adding a New Backend
 
-Tests access two clusters:
-- **Hub** (`KUBECONFIG`) — where ComputeInstance CRs, jobs, and the fulfillment service live
-- **VM cluster** (`OSAC_VM_KUBECONFIG`) — where VirtualMachine and VirtualMachineInstance resources live
+Create `infra/<name>/` with:
+- `contract.mk` — Makefile implementing the contract targets (see `infra/contract.md`)
+- `capabilities` — shell-sourceable file declaring `SUPPORTED_SUITES="suite1 suite2"`
 
-In single-cluster dev setups (VMs run on the hub): set `OSAC_VM_KUBECONFIG` to the same value as `KUBECONFIG`.
-
-In two-cluster setups: set `OSAC_VM_KUBECONFIG` to the virt cluster kubeconfig. The hub kubeconfig manages CRs, the VM kubeconfig verifies VM state.
-
-## Legacy Ansible Tests
-
-The Ansible playbooks in `playbooks/` and `roles/` are the original test implementations. They will be removed once pytest reaches full parity and is verified in CI.
-
-To run Ansible tests:
-
-```bash
-ansible-playbook playbooks/test_compute_instance_creation.yml -e test_namespace=osac-devel
-```
+No changes to test code or the top-level Makefile are needed.

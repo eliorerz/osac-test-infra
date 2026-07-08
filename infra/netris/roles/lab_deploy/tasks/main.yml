@@ -1,0 +1,51 @@
+---
+- name: Load netris-lab variables
+  ansible.builtin.include_vars:
+    file: "{{ netris_lab_dir }}/group_vars/all.yml"
+
+- name: Pre-flight checks
+  ansible.builtin.include_tasks: preflight.yml
+
+- name: Ensure br-mgmt bridge exists
+  ansible.builtin.shell: |
+    ip link show {{ mgmt_bridge_name }} 2>/dev/null || {
+      ip link add name {{ mgmt_bridge_name }} type bridge
+      ip addr add {{ mgmt_bridge_cidr }} dev {{ mgmt_bridge_name }}
+    }
+    ip link set dev {{ mgmt_bridge_name }} up
+  changed_when: false
+
+- name: Ensure br-public bridge exists
+  ansible.builtin.shell: |
+    ip link show {{ public_bridge_name }} 2>/dev/null || {
+      ip link add name {{ public_bridge_name }} type bridge
+    }
+    ip link set dev {{ public_bridge_name }} up
+  changed_when: false
+
+- name: Disable reverse path filtering on br-public (isolated mode)
+  when: connectivity_mode == "isolated"
+  ansible.posix.sysctl:
+    name: "net.ipv4.conf.{{ public_bridge_name }}.rp_filter"
+    value: "0"
+    sysctl_set: true
+
+- name: Deploy K3s and Netris controller
+  ansible.builtin.include_role:
+    name: k3s_controller
+
+- name: Deploy network topology
+  ansible.builtin.include_role:
+    name: topology
+
+- name: Deploy cloud simulation
+  ansible.builtin.include_role:
+    name: cloudsim
+
+- name: Configure connectivity
+  ansible.builtin.include_role:
+    name: connectivity
+
+- name: Verify netris-lab deployment
+  ansible.builtin.include_role:
+    name: verify

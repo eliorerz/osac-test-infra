@@ -1,0 +1,7 @@
+---
+- name: Setup Netris lab (prerequisites + cache)
+  hosts: all
+  gather_facts: true
+  become: true
+  roles:
+    - lab_setup
