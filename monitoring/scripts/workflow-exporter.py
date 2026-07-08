@@ -61,7 +61,8 @@ DB_FILE = os.path.join(CACHE_DIR, "workflow-exporter.db")
 LEGACY_CACHE_FILE = os.path.join(CACHE_DIR, "workflow-exporter-cache.json")
 
 JOB_COLUMNS = [
-    "id", "repo", "workflow", "display_name", "category", "branch", "status",
+    "id", "repo", "workflow", "display_name", "category", "branch",
+    "pr_url", "pr_display", "status",
     "conclusion", "event", "trigger", "duration_s", "duration", "actor",
     "url", "created_at", "updated_at", "run_number", "run_attempt",
     "failed_step", "steps_json",
@@ -153,6 +154,10 @@ class WorkflowExporter:
         # unrelated to the persisted job history below.
         self.active_runs = []
         self._lock = threading.Lock()
+        # Branch-to-PR mapping: {repo: {branch: (pr_num, pr_url)}}
+        self._pr_map = {}
+        self._pr_map_ts = 0
+        self._pr_backfill_done = False
         self._init_db()
 
     # -- SQLite persistence ---------------------------------------------------
@@ -186,7 +191,16 @@ class WorkflowExporter:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at)")
+            # Add columns introduced after the table was first created --
+            # CREATE TABLE IF NOT EXISTS doesn't alter an existing table's
+            # schema, so a DB from before pr_url/pr_display existed needs
+            # an explicit migration.
+            existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+            for col in ("pr_url", "pr_display"):
+                if col not in existing_cols:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT DEFAULT ''")
         self._migrate_json_cache_if_needed()
+        self._backfill_pr_data_from_legacy_cache()
 
     def _migrate_json_cache_if_needed(self):
         """One-time import of the legacy JSON cache into the new DB.
@@ -223,6 +237,44 @@ class WorkflowExporter:
                          imported, len(jobs))
         except Exception:
             logger.exception("Failed to migrate legacy JSON cache")
+
+    def _backfill_pr_data_from_legacy_cache(self):
+        """One-time backfill of pr_url/pr_display for jobs already imported
+        from the legacy JSON cache before pr_url/pr_display were tracked.
+
+        _migrate_json_cache_if_needed() only imports once (it skips the
+        whole file if the jobs table is already non-empty), so if that
+        import already ran before pr_url/pr_display existed in
+        JOB_COLUMNS, those rows are stuck without PR info even though the
+        renamed cache file still has it. Re-reads that renamed file (if
+        still present) and patches matching rows, then renames it again so
+        this doesn't re-scan it on every restart.
+        """
+        migrated_file = LEGACY_CACHE_FILE + ".migrated"
+        if not os.path.exists(migrated_file):
+            return
+        try:
+            with open(migrated_file) as f:
+                data = json.load(f)
+            updated = 0
+            with self._db() as conn:
+                for job in data.get("recent_jobs", []):
+                    if not job.get("pr_url"):
+                        continue
+                    cur = conn.execute(
+                        "UPDATE jobs SET pr_url = :pr_url, pr_display = :pr_display "
+                        "WHERE id = :id AND (pr_url IS NULL OR pr_url = '')",
+                        {
+                            "pr_url": job["pr_url"],
+                            "pr_display": job.get("pr_display", ""),
+                            "id": job["id"],
+                        },
+                    )
+                    updated += cur.rowcount
+            os.replace(migrated_file, migrated_file + ".pr-backfilled")
+            logger.info("Backfilled pr_url/pr_display for %d historical jobs", updated)
+        except Exception:
+            logger.exception("Failed to backfill PR data from legacy cache")
 
     def _upsert_job(self, record):
         """Insert a job record, or overwrite it if a row with the same id
@@ -334,6 +386,87 @@ class WorkflowExporter:
         logger.info("Active repos (with Actions): %d / %d", len(active), len(all_repos))
         return active
 
+    def _refresh_pr_map(self, repos):
+        """Fetch open+recently-closed PRs per repo, build branch->PR map.
+
+        Refreshed at most once per poll cycle (cached for POLL_INTERVAL).
+        Costs 1 API call per repo (~5 calls total). The runs API's own
+        `pull_requests` field is often empty for a pull_request-triggered
+        run, so this is the fallback used to resolve a PR from the run's
+        head branch instead.
+        """
+        now = time.time()
+        if self._pr_map and now - self._pr_map_ts < POLL_INTERVAL:
+            return
+        pr_map = {}
+        for repo in repos:
+            mapping = {}
+            for state in ("open", "closed"):
+                url = (f"{API_URL}/repos/{ORG}/{repo}/pulls"
+                       f"?state={state}&per_page=30&sort=updated"
+                       f"&direction=desc")
+                try:
+                    resp = self._get(url)
+                    if resp.status_code == 200:
+                        for pr in resp.json():
+                            branch = pr.get("head", {}).get("ref", "")
+                            num = pr.get("number")
+                            if branch and num:
+                                mapping[branch] = (
+                                    num,
+                                    f"https://github.com/{ORG}/{repo}/pull/{num}",
+                                )
+                except Exception:
+                    logger.debug("Failed to fetch PRs for %s/%s", repo, state)
+            pr_map[repo] = mapping
+        self._pr_map = pr_map
+        self._pr_map_ts = now
+        total = sum(len(v) for v in pr_map.values())
+        logger.info("PR map refreshed: %d branches across %d repos", total, len(pr_map))
+
+    def _lookup_pr(self, repo, branch):
+        """Look up PR number and URL from the branch->PR map."""
+        mapping = self._pr_map.get(repo, {})
+        return mapping.get(branch, (None, ""))
+
+    def _backfill_missing_pr_data(self):
+        """One-time catch-up pass: fill pr_url/pr_display for already-stored
+        pull_request jobs that predate PR tracking (or were collected while
+        it was broken).
+
+        _upsert_job only touches a row when a run's run_attempt increases,
+        so an already-completed run is never revisited by normal polling
+        -- without this, jobs stored before pr_url/pr_display existed
+        would stay stuck with an empty PR column forever, even though
+        _make_job_record now resolves it correctly for every newly
+        collected run. Only resolves branches still present in the live
+        PR map (recently open/closed, same as _lookup_pr elsewhere); PRs
+        old enough to have fallen out of that window stay unresolved --
+        called once per process lifetime since that's the only case that
+        can ever improve.
+        """
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT id, repo, branch FROM jobs "
+                "WHERE event = 'pull_request' AND (pr_url IS NULL OR pr_url = '')"
+            ).fetchall()
+            updated = 0
+            for row in rows:
+                pr_num, pr_url = self._lookup_pr(row["repo"], row["branch"])
+                if not pr_num:
+                    continue
+                pr_url = pr_url or f"https://github.com/{ORG}/{row['repo']}/pull/{pr_num}"
+                conn.execute(
+                    "UPDATE jobs SET pr_url = :pr_url, pr_display = :pr_display WHERE id = :id",
+                    {"pr_url": pr_url, "pr_display": f"#{pr_num}", "id": row["id"]},
+                )
+                updated += 1
+        logger.info(
+            "PR backfill: resolved %d/%d already-stored pull_request jobs "
+            "missing PR info (rest not in the current open/recently-closed PR window)",
+            updated, len(rows),
+        )
+
     # -- helpers for detailed job info ---------------------------------------
 
     @staticmethod
@@ -355,8 +488,7 @@ class WorkflowExporter:
             return "manual"
         return event
 
-    @staticmethod
-    def _make_job_record(run, repo):
+    def _make_job_record(self, run, repo):
         """Build a flat dict for the JSON API from a workflow run."""
         started = run.get("run_started_at") or run.get("created_at", "")
         ended = run.get("updated_at", "")
@@ -373,6 +505,22 @@ class WorkflowExporter:
         status = run.get("status", "unknown")
         display_status = conclusion if conclusion else status
 
+        # Resolve PR number/URL for pull_request-triggered runs. The run's
+        # own pull_requests array is often empty (a GitHub API quirk for
+        # forked-repo PRs in particular), so fall back to the branch->PR
+        # map built from the pulls API.
+        branch = run.get("head_branch", "")
+        pr_url = ""
+        pr_display = ""
+        if run.get("event") == "pull_request":
+            prs = run.get("pull_requests") or []
+            pr_num = prs[0].get("number") if prs else None
+            if not pr_num:
+                pr_num, pr_url = self._lookup_pr(repo, branch)
+            if pr_num:
+                pr_url = pr_url or f"https://github.com/{ORG}/{repo}/pull/{pr_num}"
+                pr_display = f"#{pr_num}"
+
         workflow_name = run.get("name", "unknown")
         return {
             "id": run.get("id"),
@@ -380,7 +528,9 @@ class WorkflowExporter:
             "workflow": workflow_name,
             "display_name": f"{repo} / {workflow_name}",
             "category": WorkflowExporter._categorize_workflow(workflow_name),
-            "branch": run.get("head_branch", ""),
+            "branch": branch,
+            "pr_url": pr_url,
+            "pr_display": pr_display,
             "status": display_status,
             "conclusion": conclusion,
             "event": run.get("event", "unknown"),
@@ -676,6 +826,7 @@ class WorkflowExporter:
         since_dt = datetime.now(timezone.utc) - timedelta(days=days)
         until_dt = datetime.now(timezone.utc)
         repos = REPOS_FILTER if REPOS_FILTER else self.get_active_repos()
+        self._refresh_pr_map(repos)
         total_seen = total_new = 0
 
         for repo in repos:
@@ -708,6 +859,7 @@ class WorkflowExporter:
             return
 
         repos = REPOS_FILTER if REPOS_FILTER else self.get_active_repos()
+        self._refresh_pr_map(repos)
         loaded = 0
         for repo in repos:
             try:
@@ -743,6 +895,10 @@ class WorkflowExporter:
     def collect(self):
         self._prune_jobs()
         repos = REPOS_FILTER if REPOS_FILTER else self.get_active_repos()
+        self._refresh_pr_map(repos)
+        if not self._pr_backfill_done:
+            self._backfill_missing_pr_data()
+            self._pr_backfill_done = True
         tot_queued = 0
         tot_in_progress = 0
         current_active = []
@@ -906,6 +1062,8 @@ class WorkflowExporter:
           since     - ISO 8601 timestamp, only return jobs created at or after
           until     - ISO 8601 timestamp, only return jobs created before
           job_type  - periodic, presubmit, or manual
+          search    - free-text substring match across workflow, repo,
+                      trigger, branch, PR, display name, and actor
         """
         status_filter = self._parse_grafana_param(params, "status")
         repo_filter = self._parse_grafana_param(params, "repo")
@@ -913,6 +1071,8 @@ class WorkflowExporter:
         workflow_name_filter = self._parse_grafana_param(params, "workflow_name")
         job_type_filter = self._parse_grafana_param(params, "job_type")
         category_filter = self._parse_grafana_param(params, "category")
+        search_filter = self._parse_grafana_param(params, "search")
+        search_lower = search_filter.lower() if search_filter else None
         limit = self._parse_limit(params)
         include_active = params.get("active", ["false"])[0].lower() == "true"
 
@@ -977,6 +1137,13 @@ class WorkflowExporter:
         if until_norm:
             where.append("created_at < :until")
             args["until"] = until_norm
+        if search_lower:
+            search_cols = ("workflow", "repo", "trigger", "branch",
+                           "pr_display", "display_name", "actor")
+            where.append("(" + " OR ".join(
+                f"LOWER({c}) LIKE :search" for c in search_cols
+            ) + ")")
+            args["search"] = f"%{search_lower}%"
 
         sql = "SELECT * FROM jobs"
         if where:
@@ -1009,6 +1176,18 @@ class WorkflowExporter:
                     return False
                 if allowed_events and job.get("event") not in allowed_events:
                     return False
+                if search_lower:
+                    haystack = " ".join([
+                        job.get("workflow", ""),
+                        job.get("repo", ""),
+                        job.get("trigger", ""),
+                        job.get("branch", ""),
+                        job.get("pr_display", ""),
+                        job.get("display_name", ""),
+                        job.get("actor", ""),
+                    ]).lower()
+                    if search_lower not in haystack:
+                        return False
                 if since_dt or until_dt:
                     created = job.get("created_at", "")
                     if created:
