@@ -12,6 +12,15 @@
 #
 # EXAMPLE:
 #   ./action-runners-setup.sh AABBCCDDEE112233445566 2
+#
+# LABELS, BASE_DIR, and RUNNER_NAME_PREFIX can be overridden via env vars to
+# register a dedicated runner (distinct name/directory, so it doesn't
+# collide with or replace the default e2e runners) for a different purpose
+# -- e.g. the monitoring-central runner used by OSAC-2204:
+#   LABELS="self-hosted,monitoring-central" \
+#   BASE_DIR="$HOME/action-runners-monitoring" \
+#   RUNNER_NAME_PREFIX="monitoring" \
+#     ./action-runners-setup.sh <TOKEN> 1
 
 set -euo pipefail
 
@@ -26,8 +35,9 @@ TOKEN="${1:-}"
 NUM_RUNNERS="${2:-1}"
 URL="https://github.com/osac-project"
 RUNNER_VERSION="2.325.0"
-BASE_DIR="$HOME/action-runners"
-LABELS="self-hosted,osac-ci"
+BASE_DIR="${BASE_DIR:-$HOME/action-runners}"
+LABELS="${LABELS:-self-hosted,osac-ci}"
+RUNNER_NAME_PREFIX="${RUNNER_NAME_PREFIX:-runner}"
 HOST_PREFIX=$(hostname -s)
 
 if [ -z "$TOKEN" ]; then
@@ -80,7 +90,7 @@ echo ""
 
 # Create runners
 for i in $(seq 1 "$NUM_RUNNERS"); do
-    RUNNER_NAME="${HOST_PREFIX}-runner-$(printf "%02d" "$i")"
+    RUNNER_NAME="${HOST_PREFIX}-${RUNNER_NAME_PREFIX}-$(printf "%02d" "$i")"
     RUNNER_DIR="$BASE_DIR/runner-$i"
 
     echo -e "${BOLD}--- Setting up $RUNNER_NAME ($i/$NUM_RUNNERS) ---${RESET}"
