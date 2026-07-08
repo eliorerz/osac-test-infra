@@ -42,7 +42,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -81,7 +81,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -117,7 +117,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -157,7 +157,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}",
+          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&search=${search}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -193,7 +193,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}",
+          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&search=${search}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -234,7 +234,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/counts?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -303,7 +303,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/counts-by-workflow?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&merge_similar=${merge_similar}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/counts-by-workflow?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&merge_similar=${merge_similar}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -366,7 +366,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/counts-by-workflow?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&merge_similar=${merge_similar}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/counts-by-workflow?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&merge_similar=${merge_similar}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -404,7 +404,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/failed-steps?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/failed-steps?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -483,7 +483,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/avg-duration-by-type?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/avg-duration-by-type?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -534,7 +534,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/avg-step-duration?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/avg-step-duration?category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": { "method": "GET", "data": "" },
           "root_selector": "",
           "columns": [
@@ -594,6 +594,14 @@
             "properties": [
               { "id": "displayName", "value": "Trigger" },
               { "id": "custom.width", "value": 150 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "pr_display" },
+            "properties": [
+              { "id": "displayName", "value": "PR" },
+              { "id": "custom.width", "value": 70 },
+              { "id": "links", "value": [{ "title": "Open PR", "url": "${__data.fields.pr_url}", "targetBlank": true }] }
             ]
           },
           {
@@ -658,6 +666,10 @@
             "properties": [{ "id": "custom.hidden", "value": true }]
           },
           {
+            "matcher": { "id": "byName", "options": "pr_url" },
+            "properties": [{ "id": "custom.hidden", "value": true }]
+          },
+          {
             "matcher": { "id": "byName", "options": "display_name" },
             "properties": [{ "id": "custom.hidden", "value": true }]
           },
@@ -678,7 +690,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/jobs?limit=200&active=true&category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&status=${status_filter}&job_type=${job_type}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/jobs?limit=200&active=true&category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&status=${status_filter}&job_type=${job_type}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": {
             "method": "GET",
             "data": ""
@@ -692,6 +704,8 @@
             { "selector": "category", "text": "category", "type": "string" },
             { "selector": "branch", "text": "branch", "type": "string" },
             { "selector": "trigger", "text": "trigger", "type": "string" },
+            { "selector": "pr_display", "text": "pr_display", "type": "string" },
+            { "selector": "pr_url", "text": "pr_url", "type": "string" },
             { "selector": "duration", "text": "duration", "type": "string" },
             { "selector": "actor", "text": "actor", "type": "string" },
             { "selector": "failed_step", "text": "failed_step", "type": "string" },
@@ -744,6 +758,14 @@
             "properties": [
               { "id": "displayName", "value": "Trigger" },
               { "id": "custom.width", "value": 140 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "pr_display" },
+            "properties": [
+              { "id": "displayName", "value": "PR" },
+              { "id": "custom.width", "value": 70 },
+              { "id": "links", "value": [{ "title": "Open PR", "url": "${__data.fields.pr_url}", "targetBlank": true }] }
             ]
           },
           {
@@ -811,6 +833,10 @@
             "properties": [{ "id": "custom.hidden", "value": true }]
           },
           {
+            "matcher": { "id": "byName", "options": "pr_url" },
+            "properties": [{ "id": "custom.hidden", "value": true }]
+          },
+          {
             "matcher": { "id": "byName", "options": "display_name" },
             "properties": [{ "id": "custom.hidden", "value": true }]
           },
@@ -831,7 +857,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "http://127.0.0.1:9103/api/jobs?status=failure&limit=100&category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url": "http://127.0.0.1:9103/api/jobs?status=failure&limit=100&category=${category}&repo=${repo_filter}&workflow_name=${workflow_name}&job_type=${job_type}&search=${search}&since=${__from:date:iso}&until=${__to:date:iso}",
           "url_options": {
             "method": "GET",
             "data": ""
@@ -844,6 +870,8 @@
             { "selector": "category", "text": "category", "type": "string" },
             { "selector": "branch", "text": "branch", "type": "string" },
             { "selector": "trigger", "text": "trigger", "type": "string" },
+            { "selector": "pr_display", "text": "pr_display", "type": "string" },
+            { "selector": "pr_url", "text": "pr_url", "type": "string" },
             { "selector": "failed_step", "text": "failed_step", "type": "string" },
             { "selector": "duration", "text": "duration", "type": "string" },
             { "selector": "actor", "text": "actor", "type": "string" },
@@ -986,6 +1014,15 @@
         ],
         "includeAll": false,
         "multi": false,
+        "refresh": 0
+      },
+      {
+        "name": "search",
+        "label": "Search",
+        "type": "textbox",
+        "current": { "text": "", "value": "", "selected": false },
+        "options": [],
+        "query": "",
         "refresh": 0
       },
       {
