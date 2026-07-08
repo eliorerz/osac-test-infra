@@ -9,3 +9,4 @@ skip_list:
 exclude_paths:
   - .cache/
   - .github/
+  - infra/

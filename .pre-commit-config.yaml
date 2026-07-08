@@ -4,11 +4,14 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^infra/.*/vendor/
       - id: check-merge-conflict
       - id: end-of-file-fixer
+        exclude: ^infra/.*/vendor/
       - id: check-added-large-files
       - id: check-case-conflict
       - id: check-json
+        exclude: ^infra/.*/vendor/
       - id: check-symlinks
       - id: detect-private-key
 
