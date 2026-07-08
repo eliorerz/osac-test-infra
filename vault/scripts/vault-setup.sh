@@ -440,6 +440,13 @@ vault policy write osac-e2e - <<'POLICY'
 path "secret/data/osac/e2e/*" {
   capabilities = ["read"]
 }
+# Allow reading monitoring stack secrets (OSAC-2204 deploy-monitoring.yml
+# reuses this same AppRole/policy -- the real trust boundary here is "who
+# can run workflows as github-runner on osac-ci-1", which a second AppRole
+# on the same box wouldn't actually narrow, just add rotation overhead for).
+path "secret/data/osac/monitoring/*" {
+  capabilities = ["read"]
+}
 POLICY
 echo "Policy 'osac-e2e' created."
 

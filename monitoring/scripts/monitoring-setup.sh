@@ -24,6 +24,17 @@
 #               Prometheus's scrape config, by the label it was registered
 #               with (see --add-tunnel).
 #
+#   --update-central / --update-agent
+#               Refresh configs/scripts/quadlets on an ALREADY-provisioned
+#               machine (used by the deploy-monitoring.yml CI workflow, see
+#               OSAC-2204) and restart the affected services -- restart, not
+#               reload, since a config-file reload can silently miss changes
+#               if anything ever replaces a bind-mounted file via rename
+#               (see the cp -f comment on regenerate_remote_targets below).
+#               Unlike --central/--agent, these assume Phase 1's directory
+#               layout and Phase 4's first-time container startup already
+#               happened, so they skip straight to copying + restarting.
+#
 # Prerequisites:
 #   - podman installed
 #   - This script is run from the repo root (or REPO_ROOT is set)
@@ -52,11 +63,14 @@ info()  { echo "    $1"; }
 ###############################################################################
 
 usage() {
-    echo "Usage: $(basename "$0") [--central | --agent | --add-tunnel <host> <base_port> [label] | --remove-tunnel <label>]"
+    echo "Usage: $(basename "$0") [--central | --agent | --update-central | --update-agent |"
+    echo "                          --add-tunnel <host> <base_port> [label] | --remove-tunnel <label>]"
     echo ""
     echo "Modes:"
     echo "  --central              Full monitoring stack (central machine only)"
     echo "  --agent                Exporters only (every runner machine)"
+    echo "  --update-central       Refresh configs/scripts + restart (already-provisioned central)"
+    echo "  --update-agent         Refresh configs/scripts + restart (already-provisioned agent)"
     echo "  --add-tunnel <h> <p> [l]  Add SSH tunnel to remote runner, wire it into"
     echo "                            Prometheus. [l] sets the instance label if <h>"
     echo "                            (e.g. a bare IP) isn't a good label on its own;"
@@ -168,8 +182,10 @@ TUNNEL_BASE_PORT=""
 TUNNEL_LABEL=""
 
 case "${1:-}" in
-    --central)   MODE="central" ;;
-    --agent)     MODE="agent" ;;
+    --central)        MODE="central" ;;
+    --agent)          MODE="agent" ;;
+    --update-central) MODE="update-central" ;;
+    --update-agent)   MODE="update-agent" ;;
     --add-tunnel)
         MODE="tunnel"
         TUNNEL_HOST="${2:-}"
@@ -282,6 +298,101 @@ if [[ "${MODE}" == "remove-tunnel" ]]; then
     regenerate_remote_targets
     reload_prometheus
     info "Removed from ${REMOTE_REGISTRY} and prometheus.yml"
+    exit 0
+fi
+
+###############################################################################
+# Handle --update-central / --update-agent modes
+#
+# For an already-provisioned machine (see the deploy-monitoring.yml CI
+# workflow, OSAC-2204): refresh configs/scripts/quadlets from the repo and
+# restart the affected services. Skips Phase 1 (directories already exist)
+# and Phase 4's first-time start-and-wait-for-healthy sequence.
+###############################################################################
+if [[ "${MODE}" == "update-central" ]]; then
+    phase 1 "Updating config files"
+
+    cp "${MONITORING_REPO_DIR}/config/prometheus.yml"   "${MONITORING_HOME}/config/prometheus.yml"
+    cp "${MONITORING_REPO_DIR}/config/alert-rules.yml"  "${MONITORING_HOME}/config/alert-rules.yml"
+    cp "${MONITORING_REPO_DIR}/config/alertmanager.yml" "${MONITORING_HOME}/config/alertmanager.yml"
+    cp "${MONITORING_REPO_DIR}/config/grafana/datasources.yml" "${MONITORING_HOME}/config/grafana/datasources.yml"
+    cp "${MONITORING_REPO_DIR}/config/grafana/dashboards.yml"  "${MONITORING_HOME}/config/grafana/dashboards.yml"
+    cp "${MONITORING_REPO_DIR}/config/grafana/dashboards/"*.json "${MONITORING_HOME}/dashboards/"
+    cp "${MONITORING_REPO_DIR}/scripts/service-health-textfile.sh" \
+       "${MONITORING_HOME}/scripts/service-health-textfile.sh"
+    chmod +x "${MONITORING_HOME}/scripts/service-health-textfile.sh"
+    # workflow-exporter.py is bind-mounted into its container at runtime
+    # (not baked into the image), so refreshing it here just needs the
+    # container restarted below to pick it up -- no image rebuild required
+    # for a script-only change.
+    cp "${MONITORING_REPO_DIR}/scripts/workflow-exporter.py" \
+       "${MONITORING_HOME}/scripts/workflow-exporter.py"
+    info "Config files + scripts updated."
+
+    # The prometheus.yml copy above just brought in the repo's template
+    # (empty BEGIN/END REMOTE TARGETS markers) -- the live 7-runner scrape
+    # list only exists in the registry (${REMOTE_REGISTRY}), which isn't in
+    # git and wasn't touched by that copy. Without this, every deploy would
+    # silently wipe all remote targets until someone re-ran --add-tunnel.
+    regenerate_remote_targets
+    info "Remote-runner scrape targets restored from ${REMOTE_REGISTRY}."
+
+    phase 2 "Installing Quadlet units"
+    for unit in node-exporter.container prometheus.container grafana.container \
+                alertmanager.container org-runner-exporter.container workflow-exporter.container; do
+        cp "${MONITORING_REPO_DIR}/quadlet/${unit}" "${QUADLET_DIR}/${unit}"
+        info "Installed ${unit}"
+    done
+    cp "${MONITORING_REPO_DIR}/systemd/service-health-textfile.service" \
+       "${SYSTEMD_USER_DIR}/service-health-textfile.service"
+    cp "${MONITORING_REPO_DIR}/systemd/service-health-textfile.timer" \
+       "${SYSTEMD_USER_DIR}/service-health-textfile.timer"
+    systemctl --user daemon-reload
+
+    phase 3 "Rebuilding workflow-exporter image"
+    # Cheap/cached when Containerfile.workflow-exporter hasn't changed --
+    # only actually rebuilds layers when the base image or deps change.
+    podman build -t localhost/osac-workflow-exporter:latest \
+        -f "${MONITORING_REPO_DIR}/containers/Containerfile.workflow-exporter" \
+        "${MONITORING_REPO_DIR}"
+
+    phase 4 "Restarting central services"
+    # Restart, not reload -- see the cp -f comment on
+    # regenerate_remote_targets. A restart can't be left silently stuck on
+    # stale config the way a reload can if a file was ever replaced via
+    # rename; it always re-opens everything fresh.
+    for svc in alertmanager.service prometheus.service grafana.service \
+               org-runner-exporter.service workflow-exporter.service node-exporter.service; do
+        echo "  Restarting ${svc} ..."
+        systemctl --user restart "${svc}"
+    done
+    systemctl --user restart service-health-textfile.timer
+
+    info "Central update complete."
+    exit 0
+fi
+
+if [[ "${MODE}" == "update-agent" ]]; then
+    phase 1 "Updating agent scripts"
+
+    cp "${MONITORING_REPO_DIR}/scripts/service-health-textfile.sh" \
+       "${MONITORING_HOME}/scripts/service-health-textfile.sh"
+    chmod +x "${MONITORING_HOME}/scripts/service-health-textfile.sh"
+    info "Scripts updated."
+
+    phase 2 "Installing Quadlet units"
+    cp "${MONITORING_REPO_DIR}/quadlet/node-exporter.container" "${QUADLET_DIR}/node-exporter.container"
+    cp "${MONITORING_REPO_DIR}/systemd/service-health-textfile.service" \
+       "${SYSTEMD_USER_DIR}/service-health-textfile.service"
+    cp "${MONITORING_REPO_DIR}/systemd/service-health-textfile.timer" \
+       "${SYSTEMD_USER_DIR}/service-health-textfile.timer"
+    systemctl --user daemon-reload
+
+    phase 3 "Restarting agent services"
+    systemctl --user restart node-exporter.service
+    systemctl --user restart service-health-textfile.timer
+
+    info "Agent update complete."
     exit 0
 fi
 
