@@ -91,7 +91,7 @@ echo ""
 # Create runners
 for i in $(seq 1 "$NUM_RUNNERS"); do
     RUNNER_NAME="${HOST_PREFIX}-${RUNNER_NAME_PREFIX}-$(printf "%02d" "$i")"
-    RUNNER_DIR="$BASE_DIR/runner-$i"
+    RUNNER_DIR="$BASE_DIR/${RUNNER_NAME_PREFIX}-$i"
 
     echo -e "${BOLD}--- Setting up $RUNNER_NAME ($i/$NUM_RUNNERS) ---${RESET}"
 

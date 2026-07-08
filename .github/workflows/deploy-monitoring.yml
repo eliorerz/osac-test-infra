@@ -24,19 +24,32 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
+      # Pinned to the exact version prometheus.container deploys
+      # (monitoring/quadlet/prometheus.container) -- :latest would make
+      # this check non-reproducible and could pass/fail independently of
+      # any real config change whenever upstream cuts a new release.
       - name: promtool check config
         run: |
-          docker run --rm -v "$PWD/monitoring/config:/config:ro" \
-            prom/prometheus:latest \
-            promtool check config /config/prometheus.yml
+          # Mounted at /etc/prometheus (not an arbitrary path) to match
+          # prometheus.yml's own `rule_files: - /etc/prometheus/alert-rules.yml`
+          # reference -- otherwise promtool can't resolve it and fails.
+          # --entrypoint promtool is required: prom/prometheus's default
+          # entrypoint is the prometheus server binary, not promtool.
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/monitoring/config:/etc/prometheus:ro" \
+            prom/prometheus:v3.4.1 \
+            check config /etc/prometheus/prometheus.yml
 
       - name: promtool check rules
         run: |
-          docker run --rm -v "$PWD/monitoring/config:/config:ro" \
-            prom/prometheus:latest \
-            promtool check rules /config/alert-rules.yml
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/monitoring/config:/etc/prometheus:ro" \
+            prom/prometheus:v3.4.1 \
+            check rules /etc/prometheus/alert-rules.yml
 
       - name: Validate Grafana dashboard JSON
         run: |
@@ -47,9 +60,13 @@ jobs:
           done
 
   deploy:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # workflow_dispatch lets the caller pick any branch/tag to run against --
+    # without the explicit ref check, a manual dispatch against an unmerged
+    # branch would still deploy straight to production.
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: monitoring-central
-    environment: monitoring
     permissions:
       contents: read
     concurrency:
@@ -90,7 +107,14 @@ jobs:
           set -euo pipefail
           ENV_FILE="${HOME}/.monitoring-server/.env"
           mkdir -p "$(dirname "${ENV_FILE}")"
-          echo "PRIVATE_GITHUB_TOKEN=${PRIVATE_GITHUB_TOKEN}" > "${ENV_FILE}"
+          touch "${ENV_FILE}"
+          # Update in place if the file already has other variables --
+          # don't clobber them.
+          if grep -q '^PRIVATE_GITHUB_TOKEN=' "${ENV_FILE}"; then
+            sed -i "s|^PRIVATE_GITHUB_TOKEN=.*|PRIVATE_GITHUB_TOKEN=${PRIVATE_GITHUB_TOKEN}|" "${ENV_FILE}"
+          else
+            echo "PRIVATE_GITHUB_TOKEN=${PRIVATE_GITHUB_TOKEN}" >> "${ENV_FILE}"
+          fi
           chmod 600 "${ENV_FILE}"
 
       - name: Update central stack
@@ -98,32 +122,86 @@ jobs:
 
       - name: Update remote agents
         run: |
-          set -euo pipefail
+          set -uo pipefail
           REGISTRY="${HOME}/.monitoring-server/config/remote-runners.txt"
           KEY="${HOME}/.monitoring-server/.ssh/monitoring_ed25519"
           SYNC_DIR="${HOME}/.monitoring-server-repo-sync"
+          KNOWN_HOSTS="${HOME}/.monitoring-server/.ssh/known_hosts"
 
           if [[ ! -s "${REGISTRY}" ]]; then
             echo "No remote runners registered -- nothing to fan out to."
             exit 0
           fi
 
+          # Build the monitoring-scoped known_hosts from already-pinned
+          # entries in the default ~/.ssh/known_hosts -- NOT from a live
+          # ssh-keyscan, which would blindly trust whatever key the host
+          # (or a MITM) presents right now with no prior verification.
+          # ssh-keygen -F only emits an entry that's already trusted, so
+          # this step introduces no new trust decision; it just fails
+          # loudly if a registered host has no pinned key to reuse.
+          DEFAULT_KNOWN_HOSTS="${HOME}/.ssh/known_hosts"
+          mkdir -p "$(dirname "${KNOWN_HOSTS}")"
+          : > "${KNOWN_HOSTS}.tmp"
+          MISSING_HOSTS=()
+          while read -r label host _port; do
+            [[ -z "${label}" ]] && continue
+            if ! ssh-keygen -F "${host}" -f "${DEFAULT_KNOWN_HOSTS}" >> "${KNOWN_HOSTS}.tmp" 2>/dev/null; then
+              MISSING_HOSTS+=("${label} (${host})")
+            fi
+          done < "${REGISTRY}"
+
+          if [[ ${#MISSING_HOSTS[@]} -gt 0 ]]; then
+            echo "ERROR: no pinned host key in ${DEFAULT_KNOWN_HOSTS} for: ${MISSING_HOSTS[*]}" >&2
+            echo "Verify the host key out-of-band, then add it manually before re-running." >&2
+            exit 1
+          fi
+          mv "${KNOWN_HOSTS}.tmp" "${KNOWN_HOSTS}"
+
+          SSH_OPTS=(-i "${KEY}" -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=${KNOWN_HOSTS}" -o ConnectTimeout=10)
+          FAILED_HOSTS=()
+
+          # Best-effort per host: one unreachable/flaky runner shouldn't
+          # block updating the other six. Failures are collected and the
+          # step still exits non-zero at the end so CI surfaces the problem.
           while read -r label host _port; do
             [[ -z "${label}" ]] && continue
             echo "=== Updating ${label} (${host}) ==="
 
-            # Sync the checked-out monitoring/ subtree fresh each deploy --
-            # remote hosts don't keep their own repo checkout (see the
-            # OSAC-2204 doc note: no host had one until this workflow),
-            # and MONITORING_REPO_DIR is explicitly overridden below so
-            # the deployed script's own relative-path resolution never
-            # comes into play.
-            rsync -az --delete -e "ssh -i ${KEY} -o StrictHostKeyChecking=yes -o ConnectTimeout=10" \
-              monitoring/ "github-runner@${host}:${SYNC_DIR}/monitoring/"
+            if ! rsync -az --delete -e "ssh ${SSH_OPTS[*]}" \
+                 monitoring/ "github-runner@${host}:${SYNC_DIR}/monitoring/"; then
+              echo "ERROR: rsync to ${label} (${host}) failed"
+              FAILED_HOSTS+=("${label}")
+              continue
+            fi
 
-            ssh -i "${KEY}" -o StrictHostKeyChecking=yes -o ConnectTimeout=10 "github-runner@${host}" \
-              "MONITORING_REPO_DIR=${SYNC_DIR}/monitoring bash ${SYNC_DIR}/monitoring/scripts/monitoring-setup.sh --update-agent"
+            if ! ssh "${SSH_OPTS[@]}" "github-runner@${host}" \
+                 "MONITORING_REPO_DIR=${SYNC_DIR}/monitoring bash ${SYNC_DIR}/monitoring/scripts/monitoring-setup.sh --update-agent"; then
+              echo "ERROR: --update-agent on ${label} (${host}) failed"
+              FAILED_HOSTS+=("${label}")
+              continue
+            fi
           done < "${REGISTRY}"
 
+          if [[ ${#FAILED_HOSTS[@]} -gt 0 ]]; then
+            echo "Failed to update: ${FAILED_HOSTS[*]}"
+            exit 1
+          fi
+
       - name: Post-deploy health check
-        run: bash monitoring/scripts/monitoring-health-check.sh
+        run: |
+          set -uo pipefail
+          # A few retries with a scrape-interval-sized gap: node-exporter on
+          # the most-recently-updated remote host may not have been
+          # re-scraped by Prometheus yet (scrape_interval: 15s) by the time
+          # this step starts, which would otherwise spuriously fail a
+          # perfectly healthy deploy.
+          for attempt in 1 2 3; do
+            if bash monitoring/scripts/monitoring-health-check.sh; then
+              exit 0
+            fi
+            echo "Health check attempt ${attempt} failed, waiting for the next Prometheus scrape cycle..."
+            sleep 20
+          done
+          echo "Health check failed after 3 attempts."
+          exit 1

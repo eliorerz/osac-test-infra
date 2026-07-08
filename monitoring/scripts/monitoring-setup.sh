@@ -317,6 +317,10 @@ if [[ "${MODE}" == "update-central" ]]; then
     cp "${MONITORING_REPO_DIR}/config/alertmanager.yml" "${MONITORING_HOME}/config/alertmanager.yml"
     cp "${MONITORING_REPO_DIR}/config/grafana/datasources.yml" "${MONITORING_HOME}/config/grafana/datasources.yml"
     cp "${MONITORING_REPO_DIR}/config/grafana/dashboards.yml"  "${MONITORING_HOME}/config/grafana/dashboards.yml"
+    # Remove stale dashboards first -- a plain cp only adds/overwrites, so a
+    # dashboard removed from the repo would otherwise linger here and keep
+    # being provisioned by Grafana indefinitely.
+    rm -f "${MONITORING_HOME}/dashboards/"*.json
     cp "${MONITORING_REPO_DIR}/config/grafana/dashboards/"*.json "${MONITORING_HOME}/dashboards/"
     cp "${MONITORING_REPO_DIR}/scripts/service-health-textfile.sh" \
        "${MONITORING_HOME}/scripts/service-health-textfile.sh"

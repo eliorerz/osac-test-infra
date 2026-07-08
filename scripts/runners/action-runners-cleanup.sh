@@ -8,6 +8,12 @@
 #
 # With TOKEN: unregisters runners from GitHub + removes locally
 # Without TOKEN: removes locally only (runners appear offline in GitHub)
+#
+# BASE_DIR and RUNNER_NAME_PREFIX must match whatever action-runners-setup.sh
+# was invoked with to register the runner(s) being cleaned up -- e.g. for the
+# dedicated monitoring-central runner (see action-runners-setup.sh):
+#   BASE_DIR="$HOME/action-runners-monitoring" RUNNER_NAME_PREFIX="monitoring" \
+#     ./action-runners-cleanup.sh <TOKEN>
 
 set -euo pipefail
 
@@ -18,7 +24,8 @@ RED="\e[31m"
 YELLOW="\e[33m"
 
 TOKEN="${1:-}"
-BASE_DIR="$HOME/action-runners"
+BASE_DIR="${BASE_DIR:-$HOME/action-runners}"
+RUNNER_NAME_PREFIX="${RUNNER_NAME_PREFIX:-runner}"
 
 echo -e "${BOLD}GitHub Actions Runner Cleanup (OSAC)${RESET}"
 echo -e "${YELLOW}This will remove all runners and their services${RESET}"
@@ -45,7 +52,7 @@ fi
 
 cd "$BASE_DIR" || { echo -e "${RED}Failed to access $BASE_DIR${RESET}"; exit 1; }
 
-RUNNER_DIRS=$(find . -maxdepth 1 -type d -name "runner-*" | sort)
+RUNNER_DIRS=$(find . -maxdepth 1 -type d -name "${RUNNER_NAME_PREFIX}-*" | sort)
 
 if [ -z "$RUNNER_DIRS" ]; then
     echo -e "${YELLOW}No runner directories found${RESET}"
@@ -61,8 +68,8 @@ HOST_PREFIX=$(hostname -s)
 
 for RUNNER_DIR in $RUNNER_DIRS; do
     RUNNER_DIR=$(basename "$RUNNER_DIR")
-    RUNNER_NUM=$(echo "$RUNNER_DIR" | sed 's/runner-//')
-    RUNNER_NAME="${HOST_PREFIX}-runner-$(printf "%02d" "$RUNNER_NUM")"
+    RUNNER_NUM=$(echo "$RUNNER_DIR" | sed "s/${RUNNER_NAME_PREFIX}-//")
+    RUNNER_NAME="${HOST_PREFIX}-${RUNNER_NAME_PREFIX}-$(printf "%02d" "$RUNNER_NUM")"
 
     echo -e "${BOLD}--- Removing $RUNNER_NAME ---${RESET}"
 
