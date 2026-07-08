@@ -440,11 +440,14 @@ vault policy write osac-e2e - <<'POLICY'
 path "secret/data/osac/e2e/*" {
   capabilities = ["read"]
 }
-# Allow reading monitoring stack secrets (OSAC-2204 deploy-monitoring.yml
-# reuses this same AppRole/policy -- the real trust boundary here is "who
-# can run workflows as github-runner on osac-ci-1", which a second AppRole
-# on the same box wouldn't actually narrow, just add rotation overhead for).
-path "secret/data/osac/monitoring/*" {
+# Allow reading the monitoring stack's GitHub token (OSAC-2204
+# deploy-monitoring.yml reuses this same AppRole/policy -- the real trust
+# boundary here is "who can run workflows as github-runner on osac-ci-1",
+# which a second AppRole on the same box wouldn't actually narrow, just
+# add rotation overhead for). Scoped to this one secret, not a
+# secret/data/osac/monitoring/* wildcard, so adding other monitoring
+# secrets later doesn't implicitly grant this AppRole read access to them.
+path "secret/data/osac/monitoring/github-token" {
   capabilities = ["read"]
 }
 POLICY

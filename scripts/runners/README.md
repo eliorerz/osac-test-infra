@@ -70,6 +70,28 @@ sudo journalctl -u 'actions.runner.osac-project-*' -f
 - **Base directory:** `~/action-runners/runner-N/`
 - **Container runtime:** Podman (via `/var/run/docker.sock` symlink)
 
+### Registering a dedicated runner (different labels/purpose)
+
+`LABELS`, `BASE_DIR`, and `RUNNER_NAME_PREFIX` are overridable via env vars
+on both `action-runners-setup.sh` and `action-runners-cleanup.sh`, so a
+dedicated runner can be registered without colliding with or replacing the
+default e2e runners' names/directories. Both scripts must be given the
+same overrides for a given runner set. For example, the `monitoring-central`
+runner used by the OSAC-2204 deploy pipeline:
+
+```bash
+# Register
+LABELS="self-hosted,monitoring-central" \
+BASE_DIR="$HOME/action-runners-monitoring" \
+RUNNER_NAME_PREFIX="monitoring" \
+  ./scripts/runners/action-runners-setup.sh <TOKEN> 1
+
+# Clean up (must match the overrides used at registration time)
+BASE_DIR="$HOME/action-runners-monitoring" \
+RUNNER_NAME_PREFIX="monitoring" \
+  ./scripts/runners/action-runners-cleanup.sh <TOKEN>
+```
+
 ## Workflow Usage
 
 ```yaml
