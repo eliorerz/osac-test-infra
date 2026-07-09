@@ -1,0 +1,81 @@
+---
+name: Scan E2E logs
+
+# Fires once E2E VMaaS / E2E VMaaS Full Install has fully finished (any
+# conclusion -- credentials can leak in failed runs too). Deliberately a
+# separate workflow_run-triggered workflow rather than a job in the same
+# run: the "download workflow run logs" API 404s while any job in that run
+# (including a same-run scanner job) is still in progress, so the run must
+# already be complete before we can fetch or delete its logs.
+#
+# workflow_run only fires for runs that happened in *this* repo, so this
+# only covers e2e runs triggered directly here (this repo's own
+# *-caller.yml files). Runs triggered by other repos calling into these
+# reusable workflows (osac-installer, osac-aap, osac-operator,
+# fulfillment-service, and any future adopters) live in *their* Actions
+# history instead, so each of those repos has its own mirrored copy of this
+# workflow (invoking the same shared composite actions cross-repo).
+# audit-workflow-logs.yml's cross-repo dynamic discovery remains the backstop
+# in case a mirror is ever missing or falls behind, until the planned
+# monorepo migration removes this split entirely.
+on:
+  workflow_run:
+    workflows: ["E2E VMaaS", "E2E VMaaS Full Install"]
+    types: [completed]
+
+concurrency:
+  group: scan-e2e-logs-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  scan-logs:
+    runs-on: osac-ci
+    permissions:
+      contents: read
+      # Fetching and deleting the completed run's logs needs actions:write.
+      actions: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      # --- Secret bootstrap (inline — must not run PR-controlled code) ---
+      - name: Read AppRole credentials
+        id: approle
+        run: |
+          APPROLE_DIR="${HOME}/.vault-server/.approle"
+          echo "role-id=$(cat "${APPROLE_DIR}/role-id")" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$(cat "${APPROLE_DIR}/secret-id")"
+          echo "secret-id=$(cat "${APPROLE_DIR}/secret-id")" >> "$GITHUB_OUTPUT"
+
+      - name: Retrieve Slack webhook from Vault
+        id: vault
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
+        with:
+          url: http://127.0.0.1:8200
+          method: approle
+          roleId: ${{ steps.approle.outputs.role-id }}
+          secretId: ${{ steps.approle.outputs.secret-id }}
+          exportEnv: false
+          secrets: |
+            secret/data/osac/e2e/slack-webhook-url url | SLACK_WEBHOOK_URL
+
+      - name: Scan and purge run logs
+        id: scan
+        uses: ./.github/actions/scan-and-purge-logs
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify Slack on leak
+        if: steps.scan.outputs.leaks-found == 'true'
+        uses: ./.github/actions/notify-slack
+        with:
+          status: failure
+          workflow-name: ${{ github.event.workflow_run.name }}
+          failed-step: "Credential(s) detected in run logs (${{ steps.scan.outputs.findings-count }} finding(s))"
+          slack-webhook-url: ${{ steps.vault.outputs.SLACK_WEBHOOK_URL }}
+          workflow-url: ${{ github.event.workflow_run.html_url }}
+          branch-name: ${{ github.event.workflow_run.head_branch }}
+          commit-sha: ${{ github.event.workflow_run.head_sha }}

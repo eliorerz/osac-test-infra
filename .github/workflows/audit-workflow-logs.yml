@@ -1,0 +1,252 @@
+---
+name: Audit workflow logs
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      lookback-hours:
+        description: "Re-scan completed e2e runs created in the last N hours"
+        required: false
+        default: "25"
+
+concurrency:
+  group: audit-workflow-logs
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    # Vault is only reachable at 127.0.0.1 from the osac-ci runners
+    # themselves, so this must run there to fetch secrets -- even though the
+    # scan itself needs no cluster access.
+    runs-on: osac-ci
+    permissions:
+      contents: read
+      # The tracking issue lives in this repo, so issues:write is enough at
+      # the job-permissions level for that part. Cross-repo run listing and
+      # log fetch/delete use the org-scoped GH_ORG_TOKEN from Vault instead
+      # (see "Scan each run's logs" below), not this job's own token.
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      # --- Secret bootstrap (inline — must not run PR-controlled code) ---
+      - name: Read AppRole credentials
+        id: approle
+        run: |
+          APPROLE_DIR="${HOME}/.vault-server/.approle"
+          echo "role-id=$(cat "${APPROLE_DIR}/role-id")" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$(cat "${APPROLE_DIR}/secret-id")"
+          echo "secret-id=$(cat "${APPROLE_DIR}/secret-id")" >> "$GITHUB_OUTPUT"
+
+      - name: Retrieve secrets from Vault
+        id: vault
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
+        with:
+          url: http://127.0.0.1:8200
+          method: approle
+          roleId: ${{ steps.approle.outputs.role-id }}
+          secretId: ${{ steps.approle.outputs.secret-id }}
+          exportEnv: false
+          secrets: |
+            secret/data/osac/e2e/github-token token | GH_ORG_TOKEN ;
+            secret/data/osac/e2e/slack-webhook-url url | SLACK_WEBHOOK_URL
+
+      - name: List recent e2e runs
+        id: list
+        env:
+          GH_TOKEN: ${{ steps.vault.outputs.GH_ORG_TOKEN }}
+          LOOKBACK_HOURS: ${{ inputs.lookback-hours || '25' }}
+        run: |
+          SINCE=$(date -u -d "${LOOKBACK_HOURS} hours ago" +%Y-%m-%dT%H:%M:%S)
+          echo "Listing runs completed since ${SINCE}Z..."
+
+          # This repo's own two reusable workflows are always in scope --
+          # workflow_run (scan-e2e-logs.yml) only covers runs triggered
+          # directly here, so this audit is their cross-repo safety net too.
+          TARGETS=(
+            "${GITHUB_REPOSITORY}:e2e-vmaas.yml"
+            "${GITHUB_REPOSITORY}:e2e-vmaas-full-install.yml"
+          )
+
+          # Discover every OTHER repo currently calling into these reusable
+          # workflows, instead of relying on a manually maintained list
+          # (verified via a real run of this exact query that a static list
+          # goes stale fast: osac-aap, osac-operator, fulfillment-service,
+          # and a second caller inside osac-installer/nightly-build.yaml were
+          # all found this way, none of them in the original hand-written
+          # list). Local callers here use relative `uses: ./...` syntax so
+          # they don't match this search, which is why the baseline above is
+          # still needed. This dynamic discovery -- and GH_ORG_TOKEN below --
+          # becomes unnecessary once the planned monorepo migration lands.
+          echo "::group::Discover cross-repo callers"
+          DISCOVER_RESP="${RUNNER_TEMP}/discover.json"
+          HTTP_CODE=$(curl -sL -o "${DISCOVER_RESP}" -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/search/code?q=${GITHUB_REPOSITORY}%2F.github%2Fworkflows%2Fe2e-vmaas+org:osac-project&per_page=100")
+          if [[ "${HTTP_CODE}" != "200" ]]; then
+            echo "::warning::Cross-repo caller discovery failed (HTTP ${HTTP_CODE}); auditing only this repo's own runs this time."
+          else
+            while IFS= read -r TARGET; do
+              TARGETS+=("${TARGET}")
+            done < <(jq -r '.items[]? | "\(.repository.full_name):\(.path | split("/") | last)"' "${DISCOVER_RESP}" | sort -u)
+          fi
+          echo "Auditing ${#TARGETS[@]} target(s): ${TARGETS[*]}"
+          echo "::endgroup::"
+
+          RUNS="[]"
+          for TARGET in "${TARGETS[@]}"; do
+            REPO="${TARGET%%:*}"
+            WORKFLOW="${TARGET#*:}"
+            RESP_FILE="${RUNNER_TEMP}/runs-resp.json"
+            HTTP_CODE=$(curl -sL -o "${RESP_FILE}" -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${REPO}/actions/workflows/${WORKFLOW}/runs?status=completed&created=%3E${SINCE}&per_page=100")
+            if [[ "${HTTP_CODE}" != "200" ]]; then
+              echo "::warning::Could not list runs for ${TARGET} (HTTP ${HTTP_CODE}), skipping."
+              continue
+            fi
+            IDS=$(jq --arg repo "${REPO}" '[.workflow_runs[]? | {run_id: (.id | tostring), repo: $repo}]' "${RESP_FILE}")
+            RUNS=$(jq -cn --argjson a "${RUNS}" --argjson b "${IDS}" '$a + $b')
+          done
+
+          echo "Found $(echo "${RUNS}" | jq 'length') run(s) to audit across ${#TARGETS[@]} target(s)."
+          echo "runs=${RUNS}" >> "$GITHUB_OUTPUT"
+
+      - name: Scan each run's logs
+        id: scan
+        env:
+          GH_TOKEN: ${{ steps.vault.outputs.GH_ORG_TOKEN }}
+          RUNS: ${{ steps.list.outputs.runs }}
+        run: |
+          AUDIT_DIR="${RUNNER_TEMP}/audit"
+          ALL_REDACTED_DIR="${RUNNER_TEMP}/all-redacted"
+          SUMMARY_JSONL="${AUDIT_DIR}/summary.jsonl"
+          mkdir -p "${AUDIT_DIR}" "${ALL_REDACTED_DIR}"
+          : > "${SUMMARY_JSONL}"
+          FLAGGED=0
+
+          # Process substitution (not a trailing pipe) so the loop runs in
+          # this shell, not a subshell -- otherwise FLAGGED wouldn't survive
+          # past the loop.
+          while IFS= read -r ITEM; do
+            RUN_ID=$(echo "${ITEM}" | jq -r '.run_id')
+            REPO=$(echo "${ITEM}" | jq -r '.repo')
+            SLUG="${REPO//\//_}-${RUN_ID}"
+            echo "::group::Auditing run ${RUN_ID} (${REPO})"
+            OUTPUT_DIR="${AUDIT_DIR}/${SLUG}"
+            .github/scripts/scan-run-logs.sh "${RUN_ID}" "${OUTPUT_DIR}" "${REPO}"
+            # shellcheck disable=SC1091
+            source "${OUTPUT_DIR}/status.env"
+
+            if [[ "${LEAKS_FOUND}" == "true" ]]; then
+              FLAGGED=$((FLAGGED + 1))
+              mkdir -p "${ALL_REDACTED_DIR}/${SLUG}"
+              cp -r "${OUTPUT_DIR}/redacted/." "${ALL_REDACTED_DIR}/${SLUG}/"
+              jq -c --arg run_id "${RUN_ID}" --arg repo "${REPO}" --arg count "${FINDINGS_COUNT}" \
+                '{run_id: $run_id, repo: $repo, findings_count: ($count | tonumber), findings: [.[] | {rule: .RuleID, file: .File, line: .StartLine}]}' \
+                "${OUTPUT_DIR}/findings.json" >> "${SUMMARY_JSONL}"
+            fi
+            echo "::endgroup::"
+          done < <(echo "${RUNS}" | jq -c '.[]')
+
+          echo "flagged-count=${FLAGGED}" >> "$GITHUB_OUTPUT"
+          echo "SUMMARY_JSONL=${SUMMARY_JSONL}" >> "$GITHUB_ENV"
+          echo "ALL_REDACTED_DIR=${ALL_REDACTED_DIR}" >> "$GITHUB_ENV"
+
+      - name: Upload combined redacted logs
+        if: steps.scan.outputs.flagged-count != '0'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: audit-redacted-logs-${{ github.run_id }}
+          path: ${{ env.ALL_REDACTED_DIR }}
+          retention-days: 30
+
+      - name: Write job summary
+        if: always()
+        env:
+          FLAGGED_COUNT: ${{ steps.scan.outputs.flagged-count || '0' }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          {
+            echo "## Workflow log audit"
+            echo ""
+            if [[ "${FLAGGED_COUNT}" == "0" ]]; then
+              echo "No leaked credentials found in this audit window."
+            else
+              echo ":rotating_light: **${FLAGGED_COUNT}** run(s) had leaked credential(s) -- see the tracking issue and \`audit-redacted-logs-${RUN_ID}\` artifact."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report findings
+        if: steps.scan.outputs.flagged-count != '0'
+        env:
+          # This repo's own token is enough here: the tracking issue is
+          # always created/updated in this repo, regardless of which repo
+          # a flagged run came from (unlike run listing/log fetch above,
+          # which need the org-scoped token to reach other repos).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FLAGGED_COUNT: ${{ steps.scan.outputs.flagged-count }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTIFACT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts
+        run: |
+          echo "::group::Build findings body"
+          BODY_FILE="${RUNNER_TEMP}/issue-body.md"
+          {
+            echo "Automated audit found leaked credential(s) in **${FLAGGED_COUNT}** e2e workflow run(s)."
+            echo ""
+            echo "Raw logs for each affected run have been deleted; a redacted copy of each is in the"
+            echo "[\`audit-redacted-logs-${RUN_ID}\`](${ARTIFACT_URL}) artifact from [this audit run](${RUN_URL})."
+            echo ""
+            echo "| Repo | Run | Findings | Rule(s) |"
+            echo "|---|---|---|---|"
+            jq -r '"| \(.repo) | [\(.run_id)](https://github.com/\(.repo)/actions/runs/\(.run_id)) | \(.findings_count) | " + ([.findings[].rule] | unique | join(", ")) + " |"' "${SUMMARY_JSONL}"
+            echo ""
+            echo "Rotate any credential(s) above that are real (not test/dev-only values)."
+          } > "${BODY_FILE}"
+          echo "::endgroup::"
+
+          echo "::group::Create or update tracking issue"
+          EXISTING=$(curl -sL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues?state=open&labels=credential-leak&per_page=1")
+          ISSUE_NUMBER=$(echo "${EXISTING}" | jq -r '.[0].number // empty')
+
+          if [[ -n "${ISSUE_NUMBER}" ]]; then
+            echo "Appending to existing issue #${ISSUE_NUMBER}."
+            curl -sL -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+              -d "$(jq -n --rawfile body "${BODY_FILE}" '{body: $body}')" > /dev/null
+          else
+            echo "Creating new tracking issue."
+            curl -sL -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues" \
+              -d "$(jq -n --rawfile body "${BODY_FILE}" \
+                '{title: "OSAC-1684: Leaked credentials detected in e2e workflow logs", body: $body, labels: ["credential-leak"]}')" > /dev/null
+          fi
+          echo "::endgroup::"
+
+      - name: Notify Slack
+        if: steps.scan.outputs.flagged-count != '0'
+        uses: ./.github/actions/notify-slack
+        with:
+          status: failure
+          workflow-name: "Workflow log audit"
+          failed-step: "${{ steps.scan.outputs.flagged-count }} run(s) with leaked credential(s)"
+          slack-webhook-url: ${{ steps.vault.outputs.SLACK_WEBHOOK_URL }}
+          workflow-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          branch-name: ${{ github.ref_name }}
+          commit-sha: ${{ github.sha }}
+          artifact-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts

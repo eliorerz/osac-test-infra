@@ -1,0 +1,73 @@
+---
+name: Scan and purge workflow run logs
+description: >-
+  Scan a single workflow run's logs for leaked credentials with gitleaks
+  (via scripts/scan-run-logs.sh). On a match: upload a redacted copy as an
+  artifact, warn on the job summary, and delete the raw logs to close the
+  exposure window (OSAC-1684).
+
+inputs:
+  run-id:
+    description: "Workflow run ID to scan (defaults to the current run)"
+    required: false
+    default: ${{ github.run_id }}
+  github-token:
+    description: "Token with actions:write on this repo (to fetch and delete run logs)"
+    required: true
+
+outputs:
+  leaks-found:
+    description: "'true' if gitleaks found any secrets in the run's logs"
+    value: ${{ steps.scan.outputs.leaks-found }}
+  findings-count:
+    description: "Number of findings (0 if none)"
+    value: ${{ steps.scan.outputs.findings-count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Scan run logs
+      id: scan
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RUN_ID: ${{ inputs.run-id }}
+      run: |
+        OUTPUT_DIR="${RUNNER_TEMP}/scan-logs-${RUN_ID}"
+        "${GITHUB_ACTION_PATH}/../../scripts/scan-run-logs.sh" "${RUN_ID}" "${OUTPUT_DIR}"
+
+        source "${OUTPUT_DIR}/status.env"
+        echo "leaks-found=${LEAKS_FOUND}" >> "$GITHUB_OUTPUT"
+        echo "findings-count=${FINDINGS_COUNT}" >> "$GITHUB_OUTPUT"
+        echo "OUTPUT_DIR=${OUTPUT_DIR}" >> "$GITHUB_ENV"
+
+    - name: Upload redacted logs artifact
+      if: steps.scan.outputs.leaks-found == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: redacted-logs-${{ inputs.run-id }}
+        path: ${{ env.OUTPUT_DIR }}/redacted
+        retention-days: 30
+
+    - name: Warn on job summary
+      if: steps.scan.outputs.leaks-found == 'true'
+      shell: bash
+      env:
+        RUN_ID: ${{ inputs.run-id }}
+        REPO: ${{ github.repository }}
+        SERVER_URL: ${{ github.server_url }}
+        FINDINGS_COUNT: ${{ steps.scan.outputs.findings-count }}
+      run: |
+        {
+          echo "## :rotating_light: Leaked credential(s) detected in run logs"
+          echo ""
+          echo "gitleaks found **${FINDINGS_COUNT}** potential secret(s) in the logs for run [${RUN_ID}](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID})."
+          echo ""
+          echo "- The raw logs for this run have been deleted to close the exposure window."
+          echo "- A redacted copy is attached as the \`redacted-logs-${RUN_ID}\` artifact for debugging."
+          echo "- Rotate any credential(s) below that are real (not test/dev-only values)."
+          echo ""
+          echo "| Rule | File | Line |"
+          echo "|---|---|---|"
+          jq -r '.[] | "| \(.RuleID) | \(.File) | \(.StartLine) |"' "${OUTPUT_DIR}/findings.json"
+        } >> "$GITHUB_STEP_SUMMARY"
