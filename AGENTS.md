@@ -136,11 +136,15 @@ def test_compute_instance_lifecycle(cli, k8s_hub_client, default_subnet):
 For VM-based tests, access the workload cluster via `k8s_virt_client` fixture (scoped to vmaas tests in `tests/vmaas/conftest.py`):
 
 ```python
-def test_vm_instance_exists(k8s_hub_client, k8s_virt_client):
+def test_vm_instance_exists(k8s_hub_client, k8s_virt_client, default_subnet):
+    ci_id = grpc.create_compute_instance(catalog_item="...", subnet_ids=[default_subnet])
+    name = wait_for_cr(k8s=k8s_hub_client, uuid=ci_id)
+    vm_namespace = k8s_hub_client.get_compute_instance_vm_namespace(name=name)
+
     # CR on hub cluster
     phase = k8s_hub_client.get_compute_instance_phase(name=name)
 
-    # VirtualMachineInstance on VM cluster (vm_namespace comes from the CR spec)
+    # VirtualMachineInstance on VM cluster
     status = k8s_virt_client.get_vm_printable_status(name=name, vm_namespace=vm_namespace)
 ```
 
