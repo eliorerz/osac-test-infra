@@ -15,9 +15,13 @@
 # Optional env: GITLEAKS_CONFIG (default: .gitleaks.toml next to this script)
 #
 # Writes to <output-dir>:
-#   findings.json   gitleaks' raw JSON report (always; "[]" if clean)
-#   status.env      LEAKS_FOUND=true|false and FINDINGS_COUNT=N, for the
-#                   caller to `source`
+#   findings.json   gitleaks' raw JSON report (always; "[]" if clean or the
+#                   scan couldn't run at all)
+#   status.env      SCAN_OK=true|false, LEAKS_FOUND=true|false, and
+#                   FINDINGS_COUNT=N, for the caller to `source`. SCAN_OK=false
+#                   means the run's logs could not even be fetched (e.g. an
+#                   auth/permission problem) -- callers must not treat that
+#                   the same as a genuine clean scan (LEAKS_FOUND=false).
 #   redacted/       redacted copy of the logs (only if leaks were found)
 #
 # Deliberately does not touch $GITHUB_OUTPUT, $GITHUB_STEP_SUMMARY, Slack,
@@ -45,6 +49,15 @@ FINDINGS_JSON="${OUTPUT_DIR}/findings.json"
 STATUS_FILE="${OUTPUT_DIR}/status.env"
 mkdir -p "${LOGS_DIR}"
 
+# Only the redacted copy (built later, if there are findings) is meant to
+# survive -- the raw log text is exactly what we're trying to stop being
+# exposed, so don't leave it sitting on the (persistent, self-hosted)
+# runner's disk any longer than needed.
+cleanup_raw_logs() {
+  rm -rf -- "${LOGS_DIR}" "${LOGS_ZIP}"
+}
+trap cleanup_raw_logs EXIT
+
 echo "::group::Fetch logs for run ${RUN_ID} (${REPO})"
 HTTP_CODE=$(curl -sL -o "${LOGS_ZIP}" -w '%{http_code}' \
   -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -53,7 +66,10 @@ HTTP_CODE=$(curl -sL -o "${LOGS_ZIP}" -w '%{http_code}' \
 if [[ "${HTTP_CODE}" != "200" ]]; then
   echo "::warning::Could not download logs for run ${RUN_ID} (HTTP ${HTTP_CODE}) -- skipping scan."
   echo "[]" > "${FINDINGS_JSON}"
-  { echo "LEAKS_FOUND=false"; echo "FINDINGS_COUNT=0"; } > "${STATUS_FILE}"
+  # SCAN_OK=false, not just LEAKS_FOUND=false: a failed download must not be
+  # reported as a clean scan, or an auth/permission problem would silently
+  # masquerade as "nothing to see here" for every run it affects.
+  { echo "SCAN_OK=false"; echo "LEAKS_FOUND=false"; echo "FINDINGS_COUNT=0"; } > "${STATUS_FILE}"
   echo "::endgroup::"
   exit 0
 fi
@@ -80,7 +96,7 @@ echo "Found ${FINDINGS_COUNT} potential secret(s)."
 echo "::endgroup::"
 
 if [[ "${FINDINGS_COUNT}" -eq 0 ]]; then
-  { echo "LEAKS_FOUND=false"; echo "FINDINGS_COUNT=0"; } > "${STATUS_FILE}"
+  { echo "SCAN_OK=true"; echo "LEAKS_FOUND=false"; echo "FINDINGS_COUNT=0"; } > "${STATUS_FILE}"
   exit 0
 fi
 
@@ -107,4 +123,4 @@ else
 fi
 echo "::endgroup::"
 
-{ echo "LEAKS_FOUND=true"; echo "FINDINGS_COUNT=${FINDINGS_COUNT}"; } > "${STATUS_FILE}"
+{ echo "SCAN_OK=true"; echo "LEAKS_FOUND=true"; echo "FINDINGS_COUNT=${FINDINGS_COUNT}"; } > "${STATUS_FILE}"

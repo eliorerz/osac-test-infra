@@ -12,7 +12,15 @@ import sys
 def main() -> None:
     findings_path, redacted_dir = sys.argv[1], sys.argv[2]
     findings = json.loads(pathlib.Path(findings_path).read_text() or "[]")
-    secrets = {f["Secret"] for f in findings if f.get("Secret")}
+    # Longest first: if one finding's secret happens to be a substring of
+    # another's (e.g. a truncated token vs. the full one), redacting the
+    # shorter one first would leave a partial fragment of the longer one
+    # behind in the "redacted" output.
+    secrets = sorted(
+        {f["Secret"] for f in findings if f.get("Secret")},
+        key=len,
+        reverse=True,
+    )
 
     for path in pathlib.Path(redacted_dir).rglob("*"):
         if not path.is_file():
