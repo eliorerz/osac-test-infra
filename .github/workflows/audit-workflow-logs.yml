@@ -276,12 +276,20 @@ jobs:
           echo "::endgroup::"
 
       - name: Notify Slack
-        if: steps.scan.outputs.flagged-count != '0' || steps.summary.outputs.skipped-total != '0'
+        # always(): a bare boolean condition implicitly ANDs with success(),
+        # so without this, a hard failure in "Scan each run's logs" itself
+        # (not just a tracked SCAN_OK=false) would skip this notification --
+        # exactly the failure most worth alerting on. steps.scan.outcome is
+        # checked explicitly too, since a hard failure there could in
+        # principle leave flagged-count/skipped-total unset rather than '0'.
+        if: >
+          always() &&
+          (steps.scan.outcome == 'failure' || steps.scan.outputs.flagged-count != '0' || steps.summary.outputs.skipped-total != '0')
         uses: ./.github/actions/notify-slack
         with:
           status: failure
           workflow-name: "Workflow log audit"
-          failed-step: "${{ steps.summary.outputs.notify-message }}"
+          failed-step: "${{ steps.scan.outcome == 'failure' && 'Scan step failed unexpectedly -- see run logs' || steps.summary.outputs.notify-message || 'Audit incomplete -- see run logs' }}"
           slack-webhook-url: ${{ steps.vault.outputs.SLACK_WEBHOOK_URL }}
           workflow-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           branch-name: ${{ github.ref_name }}
