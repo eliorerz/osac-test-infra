@@ -118,12 +118,19 @@ api_remaining = Gauge(
 # Exporter logic
 # ---------------------------------------------------------------------------
 class WorkflowExporter:
-    # Ordered category mapping — first match wins (case-insensitive substring)
+    # Ordered category mapping — first match wins (case-insensitive substring).
+    # release is checked before ci: ci's "build" pattern is a very common
+    # word in release/publish workflow names (e.g. "Build container image"),
+    # and would otherwise shadow release's more specific patterns since dict
+    # iteration order determines precedence here. "nightly build" is its own
+    # release pattern (not just "nightly") since a nightly workflow isn't
+    # necessarily a release/publish job -- osac-installer's specifically is
+    # (it helm-pushes charts to GHCR and tags a release).
     WORKFLOW_CATEGORIES = {
         "e2e":        ["e2e"],
         "lint":       ["pre-commit", "lint", "checklist", "kustomize", "check image"],
+        "release":    ["publish", "container image", "mirror", "nightly build"],
         "ci":         ["ci", "test", "check", "build"],
-        "release":    ["publish", "container image", "mirror"],
         "automation": ["bump", "dependabot", "copilot", "slash"],
     }
 
@@ -201,6 +208,33 @@ class WorkflowExporter:
                     conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT DEFAULT ''")
         self._migrate_json_cache_if_needed()
         self._backfill_pr_data_from_legacy_cache()
+        self._recategorize_jobs_if_needed()
+
+    def _recategorize_jobs_if_needed(self):
+        """Self-healing re-categorization: whenever WORKFLOW_CATEGORIES or
+        its matching order changes (category is computed once and stored
+        per row at insert time, not recomputed on read), this re-derives
+        every stored row's category and corrects any that no longer match
+        -- so a categorization fix applies retroactively on the next
+        restart instead of needing a one-off backfill script each time.
+        """
+        try:
+            with self._db() as conn:
+                rows = conn.execute("SELECT id, workflow, category FROM jobs").fetchall()
+                corrected = 0
+                for row in rows:
+                    fresh = self._categorize_workflow(row["workflow"] or "unknown")
+                    if fresh != row["category"]:
+                        conn.execute(
+                            "UPDATE jobs SET category = :category WHERE id = :id",
+                            {"category": fresh, "id": row["id"]},
+                        )
+                        corrected += 1
+                if corrected:
+                    logger.info("Recategorized %d/%d stored job(s) after a categorization change",
+                                 corrected, len(rows))
+        except Exception:
+            logger.exception("Failed to recategorize stored jobs")
 
     def _migrate_json_cache_if_needed(self):
         """One-time import of the legacy JSON cache into the new DB.
