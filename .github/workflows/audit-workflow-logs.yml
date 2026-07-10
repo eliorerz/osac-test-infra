@@ -138,6 +138,11 @@ jobs:
         if: always()
         id: summary
         env:
+          # Not '|| success/failure' fallback -- steps.scan.outcome always
+          # resolves to one of success/failure/cancelled/skipped by the time
+          # this step (always()) runs, since "Scan each run's logs" is
+          # earlier in the job.
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
           FLAGGED_COUNT: ${{ steps.scan.outputs.flagged-count || '0' }}
           # GitHub Actions expressions have no arithmetic operators, so the
           # two skip counters are added in bash below, not here.
@@ -150,7 +155,14 @@ jobs:
           {
             echo "## Workflow log audit"
             echo ""
-            if [[ "${FLAGGED_COUNT}" == "0" ]]; then
+            # "skipped" here means an earlier step (secrets bootstrap or run
+            # discovery) failed, so "Scan each run's logs" never ran at all --
+            # FLAGGED_COUNT/SKIPPED_TOTAL would misleadingly read all-zero in
+            # that case (nothing to flag if nothing was scanned), so this must
+            # be checked *before* falling back to the "no leaks" message.
+            if [[ "${SCAN_OUTCOME}" != "success" ]]; then
+              echo ":x: Audit did not complete -- \"Scan each run's logs\" ended in **${SCAN_OUTCOME}** (likely an earlier step failed). Results below are incomplete, not a clean pass -- see job logs."
+            elif [[ "${FLAGGED_COUNT}" == "0" ]]; then
               echo "No leaked credentials found in this audit window."
             else
               echo ":rotating_light: **${FLAGGED_COUNT}** run(s) had leaked credential(s) -- see the tracking issue and \`audit-redacted-logs-${RUN_ID}\` artifact."
@@ -167,6 +179,7 @@ jobs:
           echo "skipped-total=${SKIPPED_TOTAL}" >> "$GITHUB_OUTPUT"
 
           NOTIFY_PARTS=()
+          [[ "${SCAN_OUTCOME}" != "success" ]] && NOTIFY_PARTS+=("audit did not complete -- see job logs")
           [[ "${FLAGGED_COUNT}" != "0" ]] && NOTIFY_PARTS+=("${FLAGGED_COUNT} run(s) with leaked credential(s)")
           [[ "${SKIPPED_TOTAL}" != "0" ]] && NOTIFY_PARTS+=("${SKIPPED_TOTAL} target(s)/run(s) not scanned (partial audit)")
           [[ "${DISCOVERY_FAILED}" == "true" ]] && NOTIFY_PARTS+=("cross-repo caller discovery failed (partial audit)")
@@ -236,19 +249,24 @@ jobs:
 
       - name: Notify Slack
         # always(): a bare boolean condition implicitly ANDs with success(),
-        # so without this, a hard failure in "Scan each run's logs" itself
-        # (not just a tracked SCAN_OK=false) would skip this notification --
-        # exactly the failure most worth alerting on. steps.scan.outcome is
-        # checked explicitly too, since a hard failure there could in
-        # principle leave flagged-count/skipped-total unset rather than '0'.
+        # so without this, a hard failure upstream (not just a tracked
+        # SCAN_OK=false) would skip this notification -- exactly the failure
+        # most worth alerting on. steps.vault.outcome == 'success' is required
+        # too: if Vault/AppRole itself is what failed, SLACK_WEBHOOK_URL is
+        # empty and posting to it would just fail a second time with a
+        # confusing curl error, so we don't attempt it -- the job's own
+        # failed status is the fallback signal in that specific case. This is
+        # an accepted gap (no secrets channel independent of Vault exists in
+        # this project by design) rather than a fix.
         if: >
           always() &&
-          (steps.scan.outcome == 'failure' || steps.scan.outputs.flagged-count != '0' || steps.summary.outputs.skipped-total != '0' || steps.list.outputs.discovery-failed == 'true')
+          steps.vault.outcome == 'success' &&
+          (steps.scan.outcome != 'success' || steps.scan.outputs.flagged-count != '0' || steps.summary.outputs.skipped-total != '0' || steps.list.outputs.discovery-failed == 'true')
         uses: ./.github/actions/notify-slack
         with:
           status: failure
           workflow-name: "Workflow log audit"
-          failed-step: "${{ steps.scan.outcome == 'failure' && 'Scan step failed unexpectedly -- see run logs' || steps.summary.outputs.notify-message || 'Audit incomplete -- see run logs' }}"
+          failed-step: "${{ steps.summary.outputs.notify-message || 'Audit incomplete -- see run logs' }}"
           slack-webhook-url: ${{ steps.vault.outputs.SLACK_WEBHOOK_URL }}
           workflow-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           branch-name: ${{ github.ref_name }}
