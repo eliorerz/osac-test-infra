@@ -229,7 +229,7 @@ The snapshot flavor is pulled and cached during `make setup` (one-time ~60GB dow
 All parameters are in [`inventory/group_vars/all.yml`](inventory/group_vars/all.yml). Override any variable via `EXTRA_VARS`:
 
 ```bash
-make deploy-ocp EXTRA_VARS="ocp_version=4.21"
+make deploy-ocp EXTRA_VARS="ocp_version=4.22"
 make deploy-osac EXTRA_VARS='{"osac_installer_branch": "feature-x"}'
 ```
 
@@ -237,7 +237,7 @@ make deploy-osac EXTRA_VARS='{"osac_installer_branch": "feature-x"}'
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ocp_version` | `4.21` | OpenShift version |
+| `ocp_version` | `4.22` | OpenShift version |
 | `ocp_cluster_name` | `ocp-sno` | OCP cluster name |
 | `lab_name` | `$LAB_NAME` or `default` | Per-lab subdomain prefix (avoids DNS collisions) |
 | `dns_hosted_zone` | `ecoeng-osac-ci.devcluster.openshift.com` | Route 53 hosted zone |
@@ -254,7 +254,7 @@ make deploy-osac EXTRA_VARS='{"osac_installer_branch": "feature-x"}'
 | `netris_username` | `netris` | Netris API username |
 | `netris_password` | `netris` | Netris API password |
 | `ew_fabric_enable` | `0` | East-West fabric (0=NS only) |
-| `caas_ocp_version` | `4.21` | OCP version for CaaS discovery ISO and release image |
+| `caas_ocp_version` | `4.22` | OCP version for CaaS discovery ISO and release image |
 | `caas_cluster_template` | `ocp_ci_small` | Cluster template for CaaS cluster creation |
 | `caas_cluster_name` | `caas-ci-cluster` | CaaS cluster name |
 | `caas_host_type_id` | `ci-worker` | Resource class for CaaS agents |
