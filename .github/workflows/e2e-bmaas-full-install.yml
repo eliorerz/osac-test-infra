@@ -530,7 +530,7 @@ jobs:
         env:
           KUBECONFIG: ${{ runner.temp }}/kubeconfig
           BMH_NAMESPACE: ${{ inputs.bmh-namespace }}
-        run: sudo -E bash .github/scripts/setup-virtual-bmh.sh
+        run: bash .github/scripts/setup-virtual-bmh.sh
 
       - name: Run E2E tests
         id: test
