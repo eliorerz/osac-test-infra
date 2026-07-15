@@ -10,6 +10,7 @@ import sys
 
 
 def main() -> None:
+    """Redact every finding's secret value in-place across redacted_dir."""
     findings_path, redacted_dir = sys.argv[1], sys.argv[2]
     findings = json.loads(pathlib.Path(findings_path).read_text() or "[]")
     # Longest first: if one finding's secret happens to be a substring of
