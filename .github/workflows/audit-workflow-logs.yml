@@ -17,6 +17,18 @@ concurrency:
 
 jobs:
   audit:
+    # workflow_dispatch lets anyone with write access pick *any* branch to
+    # run this job against, executing that branch's own copy of this file
+    # with this job's full Vault/GH_ORG_TOKEN access -- a same-file `if:`
+    # guard can't close that gap, since an attacker dispatching against
+    # their own branch controls that exact file and would just remove the
+    # guard in their copy. Restricting the "audit-privileged" environment's
+    # deployment branches to `main` (Settings -> Environments, org-admin
+    # action -- see PR #182's follow-up item) is enforced server-side
+    # regardless of the dispatched branch's file content, so it's a real
+    # boundary rather than a cosmetic one. schedule: always runs off the
+    # default branch already; this only actually changes workflow_dispatch.
+    environment: audit-privileged
     # Vault is only reachable at 127.0.0.1 from the osac-ci runners
     # themselves, so this must run there to fetch secrets -- even though the
     # scan itself needs no cluster access.
