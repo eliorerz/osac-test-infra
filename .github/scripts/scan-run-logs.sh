@@ -76,10 +76,19 @@ cleanup_raw_logs() {
 trap cleanup_raw_logs EXIT
 
 echo "::group::Fetch logs for run ${RUN_ID} (${REPO})"
-HTTP_CODE=$(curl -sL -o "${LOGS_ZIP}" -w '%{http_code}' \
+# `if ! VAR=$(...)` (not a plain assignment) so a curl *transport* failure
+# (DNS, connection refused/reset, TLS) is caught here as a non-200 case too,
+# instead of an unguarded non-zero curl exit tripping `set -e` and killing
+# the script before it ever writes STATUS_FILE. --max-time is generous since
+# a real run's logs.zip can be sizeable; --connect-timeout keeps a dead
+# endpoint from hanging the job indefinitely either way.
+if ! HTTP_CODE=$(curl -sL -o "${LOGS_ZIP}" -w '%{http_code}' \
+  --connect-timeout 10 --max-time 120 \
   -H "Authorization: Bearer ${GH_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
-  "${GITHUB_API_URL}/repos/${REPO}/actions/runs/${RUN_ID}/logs")
+  "${GITHUB_API_URL}/repos/${REPO}/actions/runs/${RUN_ID}/logs"); then
+  HTTP_CODE="curl-transport-error"
+fi
 if [[ "${HTTP_CODE}" != "200" ]]; then
   echo "::warning::Could not download logs for run ${RUN_ID} (HTTP ${HTTP_CODE}) -- skipping scan."
   echo "[]" > "${FINDINGS_JSON}"
@@ -137,10 +146,16 @@ while IFS= read -r secret; do
   [[ -n "${secret}" ]] && echo "::add-mask::${secret}"
 done < <(jq -r '.[].Secret' "${FINDINGS_RAW_JSON}" | sort -u)
 
-HTTP_CODE=$(curl -sL -o /dev/null -w '%{http_code}' -X DELETE \
+# Same `if ! VAR=$(...)` reasoning as the download above: a curl transport
+# failure here must land in the "delete failed" branch (PURGE_OK=false), not
+# crash the script via set -e before PURGE_OK/STATUS_FILE ever get written.
+if ! HTTP_CODE=$(curl -sL -o /dev/null -w '%{http_code}' -X DELETE \
+  --connect-timeout 10 --max-time 30 \
   -H "Authorization: Bearer ${GH_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
-  "${GITHUB_API_URL}/repos/${REPO}/actions/runs/${RUN_ID}/logs")
+  "${GITHUB_API_URL}/repos/${REPO}/actions/runs/${RUN_ID}/logs"); then
+  HTTP_CODE="curl-transport-error"
+fi
 if [[ "${HTTP_CODE}" != "204" ]]; then
   echo "::warning::Failed to delete raw logs for run ${RUN_ID} (HTTP ${HTTP_CODE}) -- the exposure window is NOT closed, raw logs are still on GitHub."
   PURGE_OK=false

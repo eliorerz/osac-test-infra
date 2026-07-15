@@ -28,8 +28,13 @@ def main() -> None:
             continue
         try:
             text = path.read_text(errors="ignore")
-        except OSError:
-            continue
+        except OSError as exc:
+            # Fail loudly, don't silently skip: this directory gets uploaded
+            # as an artifact afterwards, so a file we couldn't read (and
+            # therefore couldn't redact) would ship with its original,
+            # un-redacted secret still in it if we just moved on.
+            print(f"redact.py: cannot read {path}, aborting: {exc}", file=sys.stderr)
+            sys.exit(1)
         changed = False
         for secret in secrets:
             if secret and secret in text:
