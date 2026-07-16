@@ -19,23 +19,82 @@
 # netris-lab's own prerequisites role bumps net.core.rmem_default to
 # 2129920 but never raises net.core.rmem_max to match, leaving the default
 # socket receive buffer size larger than the ceiling applications are
-# allowed to request. Confirmed via a live bisection across two real
-# dispatches (bracketing exactly this one sysctl task) that
-# ansible.builtin.get_url -- used by the very next role, cache, to fetch
-# cloud images -- starts failing with "Connection failure: [ASN1:
-# NOT_ENOUGH_DATA]" only once this sysctl has been applied, while plain
-# `curl` against the identical URL from the same box in the same run is
-# completely unaffected: rmem_default > rmem_max is the reproducible
-# controlling variable, not the network, DNS, a proxy, or an ansible
-# version mismatch (all ruled out first). Not patched in netris-lab itself
-# (vendored, not our code) -- raise rmem_max back above rmem_default here
-# instead, right before the cache role runs.
+# allowed to request. A live bisection across two real dispatches
+# (bracketing exactly this one sysctl task) showed ansible.builtin.get_url
+# -- used by the very next role, cache, to fetch cloud images -- starts
+# failing with "Connection failure: [ASN1: NOT_ENOUGH_DATA]" only once this
+# sysctl has been applied, while plain `curl` against the identical URL
+# from the same box in the same run is completely unaffected.
 - name: Work around netris-lab prerequisites leaving rmem_max below rmem_default
   ansible.posix.sysctl:
     name: net.core.rmem_max
     value: "2129920"
     sysctl_set: true
     reload: true
+
+# TEMPORARY: the fix above did not actually resolve the failure on a real
+# dispatch (get_url still failed identically right after this task
+# reported changed=true) -- meaning either the sysctl write isn't taking
+# live effect, or rmem_default>rmem_max was correlation, not the full
+# causation (e.g. the increase in rmem_default's absolute value itself,
+# not its relation to rmem_max, may be what breaks get_url). Test both
+# directly, in place, right where the real failure happens: capture live
+# sysctl values, retry get_url with the current (both-raised) state, then
+# retry again after reverting rmem_default back down to its original
+# 212992 (leaving rmem_max raised) to isolate which theory is correct.
+# Restores rmem_default to 2129920 afterwards so the rest of the real play
+# still gets netris-lab's originally intended value. Remove once the real
+# mechanism is confirmed.
+- name: DIAGNOSTIC -- verify live sysctl state and retest get_url
+  ansible.builtin.shell: |
+    set -x
+    echo "=== live sysctl right after the rmem_max fix task ==="
+    sysctl net.core.rmem_default net.core.rmem_max
+    echo "=== get_url repro: current state (both raised to 2129920) ==="
+    cat > /tmp/diag_a.yml <<'EOF'
+    ---
+    - hosts: localhost
+      gather_facts: false
+      connection: local
+      tasks:
+        - ansible.builtin.get_url:
+            url: "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2"
+            dest: "/tmp/diag_a.qcow2"
+            mode: '0644'
+            timeout: 10
+          register: r
+          ignore_errors: true
+        - debug: var=r
+    EOF
+    ansible-playbook /tmp/diag_a.yml -v 2>&1 | tail -30
+    echo "=== reverting rmem_default to 212992 (leaving rmem_max raised at 2129920) and retesting ==="
+    sysctl -w net.core.rmem_default=212992
+    sysctl net.core.rmem_default net.core.rmem_max
+    cat > /tmp/diag_b.yml <<'EOF'
+    ---
+    - hosts: localhost
+      gather_facts: false
+      connection: local
+      tasks:
+        - ansible.builtin.get_url:
+            url: "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2"
+            dest: "/tmp/diag_b.qcow2"
+            mode: '0644'
+            timeout: 10
+          register: r
+          ignore_errors: true
+        - debug: var=r
+    EOF
+    ansible-playbook /tmp/diag_b.yml -v 2>&1 | tail -30
+    echo "=== restoring rmem_default to 2129920 for the rest of the real play ==="
+    sysctl -w net.core.rmem_default=2129920
+  register: diag_result
+  changed_when: false
+  ignore_errors: true
+
+- name: DIAGNOSTIC -- print diagnostic output
+  ansible.builtin.debug:
+    var: diag_result.stdout_lines
 
 - name: Cache container and cloud images
   ansible.builtin.include_role:
