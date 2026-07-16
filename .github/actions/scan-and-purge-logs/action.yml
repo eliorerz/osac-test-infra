@@ -85,6 +85,7 @@ runs:
         echo "Failed to fetch logs for run [${RUN_ID}](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}) -- this is **not** the same as a clean scan; the logs were never actually checked." >> "$GITHUB_STEP_SUMMARY"
 
     - name: Upload redacted logs artifact
+      id: upload
       if: steps.scan.outputs.leaks-found == 'true'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
@@ -109,6 +110,7 @@ runs:
         FINDINGS_COUNT: ${{ steps.scan.outputs.findings-count }}
         PURGE_OK: ${{ steps.scan.outputs.purge-ok }}
         OUTPUT_DIR: ${{ steps.scan.outputs.output-dir }}
+        UPLOAD_OK: ${{ steps.upload.outcome == 'success' }}
       run: |
         {
           echo "## :rotating_light: Leaked credential(s) detected in run logs"
@@ -124,7 +126,15 @@ runs:
           else
             echo "- :warning: **Failed to delete the raw logs for this run** -- the exposure window is **NOT** closed; the raw logs are still on GitHub. Delete them manually (\`gh api -X DELETE repos/${REPO}/actions/runs/${RUN_ID}/logs\`) or re-run this scan."
           fi
-          echo "- A redacted copy is attached as the \`redacted-logs-${RUN_ID}\` artifact for debugging."
+          # Don't unconditionally claim the artifact is there -- the upload
+          # step above can itself fail (including via its own
+          # if-no-files-found: error), and this step still runs regardless
+          # via always().
+          if [[ "${UPLOAD_OK}" == "true" ]]; then
+            echo "- A redacted copy is attached as the \`redacted-logs-${RUN_ID}\` artifact for debugging."
+          else
+            echo "- :warning: **Failed to upload the redacted-logs artifact** -- no redacted copy is attached; check the run logs for the upload step's failure."
+          fi
           echo "- Rotate any credential(s) below that are real (not test/dev-only values)."
           echo ""
           echo "| Rule | File | Line |"

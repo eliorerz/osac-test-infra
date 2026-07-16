@@ -88,6 +88,27 @@ mkdir -p "${LOGS_DIR}"
 # it -- if the script exits (e.g. redact.py itself fails under `set -e`)
 # before REDACTION_COMPLETE is set, that directory still contains real
 # secrets and must be purged too, not just left behind for the caller.
+#
+# write_status() writes via a temp file + mv (same directory, so the mv is
+# a same-filesystem rename) instead of a direct `> "${STATUS_FILE}"` --
+# the latter truncates the file immediately, so a kill/crash mid-write
+# would leave an empty-but-existing file behind. A plain `-f` existence
+# check on that would wrongly treat it as already-written and skip the
+# trap's own fallback below, so status_file_is_valid() checks content, not
+# just presence.
+write_status() {
+  local tmp
+  tmp="$(mktemp "${OUTPUT_DIR}/.status.env.XXXXXX")"
+  printf '%s\n' "$@" > "${tmp}"
+  mv -f -- "${tmp}" "${STATUS_FILE}"
+}
+status_file_is_valid() {
+  local SCAN_OK="" LEAKS_FOUND="" PURGE_OK="" FINDINGS_COUNT=""
+  [[ -f "${STATUS_FILE}" ]] || return 1
+  # shellcheck disable=SC1090
+  source "${STATUS_FILE}" 2>/dev/null || return 1
+  [[ -n "${SCAN_OK}" && -n "${LEAKS_FOUND}" && -n "${PURGE_OK}" && -n "${FINDINGS_COUNT}" ]]
+}
 cleanup_raw_logs() {
   rm -rf -- "${LOGS_DIR}" "${LOGS_ZIP}" "${FINDINGS_RAW_JSON}"
   if [[ "${REDACTION_COMPLETE:-false}" != "true" ]]; then
@@ -95,13 +116,13 @@ cleanup_raw_logs() {
   fi
   # Every *normal* exit path above already writes STATUS_FILE before
   # returning -- this only fires when something else entirely (unzip,
-  # podman, jq, cp, redact.py) killed the script via `set -e` first. Without
-  # this, STATUS_FILE would simply not exist, and the composite action's own
-  # scan-ok/leaks-found/purge-ok outputs would never get set at all -- not
-  # "false", just absent -- silently dropping the "could not scan" summary
-  # instead of reporting it.
-  if [[ ! -f "${STATUS_FILE}" ]]; then
-    { echo "SCAN_OK=false"; echo "LEAKS_FOUND=false"; echo "PURGE_OK=true"; echo "FINDINGS_COUNT=0"; } > "${STATUS_FILE}"
+  # podman, jq, cp, redact.py) killed the script via `set -e` first, or left
+  # a partial/empty file behind. Without this, the composite action's own
+  # scan-ok/leaks-found/purge-ok outputs would never get set correctly --
+  # not "false", just absent or malformed -- silently dropping the "could
+  # not scan" summary instead of reporting it.
+  if ! status_file_is_valid; then
+    write_status "SCAN_OK=false" "LEAKS_FOUND=false" "PURGE_OK=true" "FINDINGS_COUNT=0"
   fi
 }
 trap cleanup_raw_logs EXIT
@@ -128,7 +149,7 @@ if [[ "${HTTP_CODE}" != "200" ]]; then
   # masquerade as "nothing to see here" for every run it affects. PURGE_OK
   # stays "true" here (vacuously -- nothing was found, so there was nothing
   # to purge); it's only ever meaningful when LEAKS_FOUND=true.
-  { echo "SCAN_OK=false"; echo "LEAKS_FOUND=false"; echo "PURGE_OK=true"; echo "FINDINGS_COUNT=0"; } > "${STATUS_FILE}"
+  write_status "SCAN_OK=false" "LEAKS_FOUND=false" "PURGE_OK=true" "FINDINGS_COUNT=0"
   echo "::endgroup::"
   exit 0
 fi
@@ -156,7 +177,7 @@ echo "::endgroup::"
 
 if [[ "${FINDINGS_COUNT}" -eq 0 ]]; then
   echo "[]" > "${FINDINGS_JSON}"
-  { echo "SCAN_OK=true"; echo "LEAKS_FOUND=false"; echo "PURGE_OK=true"; echo "FINDINGS_COUNT=0"; } > "${STATUS_FILE}"
+  write_status "SCAN_OK=true" "LEAKS_FOUND=false" "PURGE_OK=true" "FINDINGS_COUNT=0"
   exit 0
 fi
 
@@ -199,4 +220,4 @@ else
 fi
 echo "::endgroup::"
 
-{ echo "SCAN_OK=true"; echo "LEAKS_FOUND=true"; echo "PURGE_OK=${PURGE_OK}"; echo "FINDINGS_COUNT=${FINDINGS_COUNT}"; } > "${STATUS_FILE}"
+write_status "SCAN_OK=true" "LEAKS_FOUND=true" "PURGE_OK=${PURGE_OK}" "FINDINGS_COUNT=${FINDINGS_COUNT}"
