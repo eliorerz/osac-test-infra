@@ -30,6 +30,7 @@ SUSHY_PORT="${SUSHY_PORT:-8000}"
 SUSHY_CONFIG_DIR="${HOME}/sushy"
 SUSHY_PID_FILE="${SUSHY_CONFIG_DIR}/sushy.pid"
 CT_NETWORK="test-infra-net-${CLONE_NAME}"
+VIRSH="virsh -c qemu:///system"
 
 # --- Step 1: Activate Ironic via Provisioning CR ---
 echo "==> Activating Ironic (Provisioning CR)..."
@@ -55,14 +56,14 @@ echo "Ironic is active."
 
 # --- Step 2: Discover network and gateway IP ---
 echo "==> Discovering cluster-tool network..."
-if ! virsh net-info "${CT_NETWORK}" &>/dev/null; then
+if ! ${VIRSH} net-info "${CT_NETWORK}" &>/dev/null; then
   echo "ERROR: libvirt network '${CT_NETWORK}' not found." >&2
   echo "Available networks:" >&2
-  virsh net-list --all >&2
+  ${VIRSH} net-list --all >&2
   exit 1
 fi
 
-GW_IP=$(virsh net-dumpxml "${CT_NETWORK}" | grep -oP "address='\K[^']+")
+GW_IP=$(${VIRSH} net-dumpxml "${CT_NETWORK}" | grep -oP "address='\K[^']+")
 echo "Gateway IP (host): ${GW_IP}"
 
 # --- Step 3: Install and start sushy-tools ---
@@ -118,7 +119,7 @@ for i in $(seq 1 "${BMH_COUNT}"); do
   qemu-img create -f qcow2 "${DISK_PATH}" 50G
   cp "${OVMF_VARS}" "${VARS_PATH}"
 
-  virsh define /dev/stdin <<VMXML
+  ${VIRSH} define /dev/stdin <<VMXML
 <domain type='kvm'>
   <name>${VM_NAME}</name>
   <memory unit='MiB'>8192</memory>
@@ -150,7 +151,7 @@ for i in $(seq 1 "${BMH_COUNT}"); do
 </domain>
 VMXML
 
-  virsh start "${VM_NAME}"
+  ${VIRSH} start "${VM_NAME}"
   VM_NAMES="${VM_NAMES:+${VM_NAMES} }${VM_NAME}"
 done
 
@@ -175,7 +176,7 @@ i=0
 for VM_NAME in ${VM_NAMES}; do
   i=$((i + 1))
   MAC="52:54:00:bb:cc:$(printf '%02x' "${i}")"
-  VM_UUID=$(virsh domuuid "${VM_NAME}")
+  VM_UUID=$(${VIRSH} domuuid "${VM_NAME}")
 
   echo "  ${VM_NAME}: UUID=${VM_UUID}, MAC=${MAC}"
 
