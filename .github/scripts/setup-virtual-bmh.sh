@@ -153,6 +153,7 @@ for i in $(seq 1 "${BMH_COUNT}"); do
     </interface>
     <console type='pty'/>
   </devices>
+  <seclabel type='none'/>
 </domain>
 VMXML
 
