@@ -20,54 +20,63 @@
 # prerequisite task succeeds 6/6; the same loop after prerequisites fails
 # deterministically 6/6 with the identical instant "Connection failure:
 # [ASN1: NOT_ENOUGH_DATA]" error; flushing the ENTIRE nftables ruleset
-# right after prerequisites (a much stronger intervention than reverting
-# any one rule) did NOT fix it either -- ruling out nftables/NAT and the
-# already-ruled-out rmem_default/rmem_max sysctl as the cause. Also:
-# prerequisites' OWN early "Download Go" task (get_url, from go.dev)
-# succeeds fine, proving get_url itself works fine well INTO the
-# prerequisites role, before whatever the real trigger is. Since it's
-# neither the network/firewall config nor an ansible/python version issue
-# (both fully eliminated), test whether it's specific to ansible's module
-# execution at all: compare a raw Python urllib call (no ansible module
-# wrapper), curl, and ansible's get_url side by side at the exact same
-# moment, plus DNS resolution state, to see if the failure is OS/DNS-level
-# (all three would fail) or specific to how ansible executes modules (only
-# get_url fails). Remove once the real mechanism is confirmed.
-- name: DIAGNOSTIC -- compare raw Python vs curl vs ansible get_url post-prerequisites
+# right after prerequisites did NOT fix it either -- ruling out nftables/
+# NAT and the already-ruled-out rmem_default/rmem_max sysctl. The decisive
+# finding: at the exact same post-prerequisites moment, raw Python
+# urllib.request.urlopen() (no ansible module involved at all) and curl
+# BOTH succeed, while ansible's get_url still fails identically -- this is
+# specific to ansible's OWN module execution, not the network/DNS/OS at
+# all. ansible.module_utils.urls.open_url() (verified by reading the
+# actual ansible-core 2.15.13 source) ALWAYS builds an SSLContext and
+# installs a global HTTPSHandler-augmented opener via
+# urllib.request.install_opener() before calling urlopen(), even for a
+# plain http:// URL, and always sets a custom User-Agent header
+# ("ansible-httpget" by default). Isolate which of those two differences
+# (if either alone) reproduces the failure in raw Python, without going
+# through ansible's module wrapper at all. Remove once the real mechanism
+# is confirmed.
+- name: DIAGNOSTIC -- isolate ansible's open_url() behavior in raw Python
   ansible.builtin.shell: |
     set -x
-    echo "=== DNS resolution state ==="
-    cat /etc/resolv.conf
-    getent hosts downloads.netris.ai
-    python3 -c "import socket; print(socket.getaddrinfo('downloads.netris.ai', 80))"
-    echo "=== raw Python urllib (no ansible module wrapper) ==="
-    python3 -c "import urllib.request as u; r = u.urlopen('http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2', timeout=10); print('SUCCESS', r.status, len(r.read(1024)))" 2>&1
-    echo "=== curl (paired at the same moment) ==="
-    curl -v --max-time 15 -o /dev/null -r 0-1000000 "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2" 2>&1 | tail -25
-    echo "=== ansible get_url (paired at the same moment) ==="
-    cat > /tmp/diag_compare.yml <<'EOF'
-    ---
-    - hosts: localhost
-      gather_facts: false
-      connection: local
-      tasks:
-        - ansible.builtin.get_url:
-            url: "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2"
-            dest: "/tmp/diag_compare.qcow2"
-            mode: '0644'
-            timeout: 10
-          register: r
-          ignore_errors: true
-        - debug: var=r
+    echo "=== A: raw urlopen with ansible's User-Agent header only ==="
+    python3 -c "import urllib.request as u; req = u.Request('http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2'); req.add_header('User-agent', 'ansible-httpget'); r = u.urlopen(req, timeout=10); print('SUCCESS', r.status, len(r.read(1024)))" 2>&1
+    echo "=== B: raw urlopen with an ansible-style global HTTPSHandler opener installed, default User-Agent ==="
+    cat > /tmp/diag_test_b.py <<'EOF'
+    import urllib.request, ssl, traceback
+    context = ssl.create_default_context()
+    handlers = [urllib.request.HTTPSHandler(context=context)]
+    opener = urllib.request.build_opener(*handlers)
+    urllib.request.install_opener(opener)
+    try:
+        r = urllib.request.urlopen('http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2', timeout=10)
+        print('SUCCESS', r.status, len(r.read(1024)))
+    except Exception:
+        traceback.print_exc()
     EOF
-    ansible-playbook /tmp/diag_compare.yml -v 2>&1 | tail -30
-  register: diag_compare_result
+    python3 /tmp/diag_test_b.py 2>&1
+    echo "=== C: both combined (closest replica of ansible's actual open_url(), minus the AnsiballZ wrapper) ==="
+    cat > /tmp/diag_test_c.py <<'EOF'
+    import urllib.request, ssl, traceback
+    context = ssl.create_default_context()
+    handlers = [urllib.request.HTTPSHandler(context=context)]
+    opener = urllib.request.build_opener(*handlers)
+    urllib.request.install_opener(opener)
+    try:
+        req = urllib.request.Request('http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2')
+        req.add_header('User-agent', 'ansible-httpget')
+        r = urllib.request.urlopen(req, timeout=10)
+        print('SUCCESS', r.status, len(r.read(1024)))
+    except Exception:
+        traceback.print_exc()
+    EOF
+    python3 /tmp/diag_test_c.py 2>&1
+  register: diag_isolate_result
   changed_when: false
   ignore_errors: true
 
-- name: DIAGNOSTIC -- print raw Python vs curl vs ansible get_url comparison
+- name: DIAGNOSTIC -- print isolation test output
   ansible.builtin.debug:
-    var: diag_compare_result.stdout_lines
+    var: diag_isolate_result.stdout_lines
 
 - name: Cache container and cloud images
   ansible.builtin.include_role:
