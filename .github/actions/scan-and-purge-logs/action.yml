@@ -17,13 +17,13 @@ inputs:
 
 outputs:
   scan-ok:
-    description: "'false' if the run's logs could not even be fetched (do not treat this the same as a clean scan)"
+    description: "'false' if the scan did not complete (fetch failed, or a post-fetch step like unzip/podman/redact failed) -- do not treat this the same as a clean scan"
     value: ${{ steps.scan.outputs.scan-ok }}
   leaks-found:
     description: "'true' if gitleaks found any secrets in the run's logs"
     value: ${{ steps.scan.outputs.leaks-found }}
   purge-ok:
-    description: "'false' if leaks were found but deleting the raw logs failed (exposure window is NOT closed) -- only meaningful when leaks-found is 'true'"
+    description: "'false' if raw logs may still be on GitHub -- either leaks were found but the delete call failed, or the scan failed after a successful fetch (never reached delete). 'true' with scan-ok='false' means the fetch itself failed (nothing was downloaded)"
     value: ${{ steps.scan.outputs.purge-ok }}
   findings-count:
     description: "Number of findings (0 if none)"
@@ -79,10 +79,22 @@ runs:
         RUN_ID: ${{ inputs.run-id }}
         REPO: ${{ github.repository }}
         SERVER_URL: ${{ github.server_url }}
+        PURGE_OK: ${{ steps.scan.outputs.purge-ok }}
       run: |
-        echo "## :warning: Could not scan logs for leaked credentials" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo "Failed to fetch logs for run [${RUN_ID}](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}) -- this is **not** the same as a clean scan; the logs were never actually checked." >> "$GITHUB_STEP_SUMMARY"
+        {
+          echo "## :warning: Could not scan logs for leaked credentials"
+          echo ""
+          # purge-ok=true with scan-ok=false means the fetch itself failed
+          # (nothing downloaded). purge-ok=false means we got past fetch
+          # and then failed -- raw logs are still on GitHub.
+          if [[ "${PURGE_OK}" == "true" ]]; then
+            echo "Failed to fetch logs for run [${RUN_ID}](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}) -- this is **not** the same as a clean scan; the logs were never actually checked."
+          else
+            echo "Scan of run [${RUN_ID}](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}) failed after the logs were fetched (e.g. unzip/gitleaks/redact) -- this is **not** the same as a clean scan."
+            echo ""
+            echo "- :warning: **Raw logs for this run may still be on GitHub** -- the scan never reached the delete/purge step. Check the run logs and delete manually if needed (\`gh api -X DELETE repos/${REPO}/actions/runs/${RUN_ID}/logs\`)."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Upload redacted logs artifact
       id: upload

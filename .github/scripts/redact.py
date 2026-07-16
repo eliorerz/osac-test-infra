@@ -22,12 +22,17 @@ def main() -> None:
         key=len,
         reverse=True,
     )
+    # Byte-wise: read_text(errors="ignore") can drop undecodable bytes
+    # before the secret match runs, leaving a gitleaks-reported secret
+    # intact in the uploaded "redacted" artifact.
+    secret_bytes = [s.encode() for s in secrets if s]
+    redacted_marker = b"[REDACTED]"
 
     for path in pathlib.Path(redacted_dir).rglob("*"):
         if not path.is_file():
             continue
         try:
-            text = path.read_text(errors="ignore")
+            content = path.read_bytes()
         except OSError as exc:
             # Fail loudly, don't silently skip: this directory gets uploaded
             # as an artifact afterwards, so a file we couldn't read (and
@@ -36,12 +41,12 @@ def main() -> None:
             print(f"redact.py: cannot read {path}, aborting: {exc}", file=sys.stderr)
             sys.exit(1)
         changed = False
-        for secret in secrets:
-            if secret and secret in text:
-                text = text.replace(secret, "[REDACTED]")
+        for secret in secret_bytes:
+            if secret in content:
+                content = content.replace(secret, redacted_marker)
                 changed = True
         if changed:
-            path.write_text(text)
+            path.write_bytes(content)
 
 
 if __name__ == "__main__":

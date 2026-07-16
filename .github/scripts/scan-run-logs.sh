@@ -26,14 +26,18 @@
 #   status.env      SCAN_OK=true|false, LEAKS_FOUND=true|false,
 #                   PURGE_OK=true|false, and FINDINGS_COUNT=N, for the caller
 #                   to `source`.
-#                     - SCAN_OK=false means the run's logs could not even be
-#                       fetched (e.g. an auth/permission problem) -- callers
-#                       must not treat that the same as a genuine clean scan
-#                       (LEAKS_FOUND=false).
-#                     - PURGE_OK=false (only possible when LEAKS_FOUND=true)
-#                       means the raw logs were found to contain secrets but
-#                       the delete call itself failed -- callers must not
-#                       report the exposure window as closed in that case.
+#                     - SCAN_OK=false means the scan did not complete
+#                       successfully -- either the logs could not be fetched,
+#                       or a post-fetch step (unzip/podman/jq/cp/redact.py)
+#                       failed under set -e. Callers must not treat that the
+#                       same as a genuine clean scan (LEAKS_FOUND=false).
+#                     - PURGE_OK=false means raw logs may still be on GitHub:
+#                       either LEAKS_FOUND=true and the delete call failed, or
+#                       SCAN_OK=false after a successful fetch (we never got
+#                       far enough to attempt a delete, so the exposure window
+#                       is still open). PURGE_OK=true with SCAN_OK=false is
+#                       only the pre-fetch failure case (nothing was ever
+#                       downloaded, so there was nothing to purge).
 #   redacted/       redacted copy of the logs (only if leaks were found)
 #
 # Deliberately does not touch $GITHUB_OUTPUT, $GITHUB_STEP_SUMMARY, Slack,
@@ -111,8 +115,11 @@ status_file_is_valid() {
 }
 cleanup_raw_logs() {
   rm -rf -- "${LOGS_DIR}" "${LOGS_ZIP}" "${FINDINGS_RAW_JSON}"
-  if [[ "${REDACTION_COMPLETE:-false}" != "true" ]]; then
-    rm -rf -- "${REDACTED_DIR:-}"
+  # Guard -n: on clean scans / download failures REDACTED_DIR is unset.
+  # Passing an empty path to rm is a no-op on GNU rm today, but still not
+  # something an EXIT trap under set -e should rely on.
+  if [[ "${REDACTION_COMPLETE:-false}" != "true" && -n "${REDACTED_DIR:-}" ]]; then
+    rm -rf -- "${REDACTED_DIR}"
   fi
   # Every *normal* exit path above already writes STATUS_FILE before
   # returning -- this only fires when something else entirely (unzip,
@@ -121,8 +128,18 @@ cleanup_raw_logs() {
   # scan-ok/leaks-found/purge-ok outputs would never get set correctly --
   # not "false", just absent or malformed -- silently dropping the "could
   # not scan" summary instead of reporting it.
+  #
+  # Distinguish pre-fetch vs post-fetch failure for PURGE_OK: if the logs
+  # were already downloaded, they are still sitting on GitHub (we only
+  # DELETE after a confirmed leak), so claiming PURGE_OK=true would lie
+  # about the exposure window. Pre-fetch failures never got logs, so
+  # purge is vacuously fine.
   if ! status_file_is_valid; then
-    write_status "SCAN_OK=false" "LEAKS_FOUND=false" "PURGE_OK=true" "FINDINGS_COUNT=0"
+    if [[ "${LOGS_FETCHED:-false}" == "true" ]]; then
+      write_status "SCAN_OK=false" "LEAKS_FOUND=false" "PURGE_OK=false" "FINDINGS_COUNT=0"
+    else
+      write_status "SCAN_OK=false" "LEAKS_FOUND=false" "PURGE_OK=true" "FINDINGS_COUNT=0"
+    fi
   fi
 }
 trap cleanup_raw_logs EXIT
@@ -153,6 +170,10 @@ if [[ "${HTTP_CODE}" != "200" ]]; then
   echo "::endgroup::"
   exit 0
 fi
+# Mark before unzip: a failed unzip is already a post-fetch failure (the
+# zip is on disk and the run's logs exist on GitHub), so the trap's
+# PURGE_OK=false fallback must apply.
+LOGS_FETCHED=true
 unzip -q "${LOGS_ZIP}" -d "${LOGS_DIR}"
 echo "::endgroup::"
 
