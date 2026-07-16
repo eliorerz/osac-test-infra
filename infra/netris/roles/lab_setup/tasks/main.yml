@@ -1,50 +1,4 @@
 ---
-# TEMPORARY: a prior theory (netris-lab's prerequisites role raising
-# net.core.rmem_default above rmem_max) was disproven by a real dispatch --
-# reverting rmem_default back down (with rmem_max still raised) did NOT fix
-# the get_url failure either, so the sysctl values were never the actual
-# cause; the earlier "bisection" that seemed to implicate them was
-# confounded by something else. Every dispatch so far shows the SAME
-# pattern regardless of which sysctl was tried: an EARLY get_url call in
-# the job succeeds, and a LATER one (minutes in, inside the real cache
-# role) always fails -- which looks a lot like a time- or request-count-
-# based rate limit/block (server-side or a WAF/CDN in front of it), not
-# anything about this box's own kernel/network state. Test that directly:
-# hit the same URL repeatedly in a tight loop, before ANY prerequisite
-# task has run at all, to see whether it starts failing purely as a
-# function of repeated requests with zero intervening state changes.
-# Remove once the real mechanism is confirmed.
-- name: DIAGNOSTIC -- repeated get_url calls before any prerequisites run
-  ansible.builtin.shell: |
-    set -x
-    cat > /tmp/diag_loop.yml <<'EOF'
-    ---
-    - hosts: localhost
-      gather_facts: false
-      connection: local
-      tasks:
-        - ansible.builtin.get_url:
-            url: "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2"
-            dest: "/tmp/diag_loop.qcow2"
-            mode: '0644'
-            timeout: 10
-          register: r
-          ignore_errors: true
-        - debug: var=r
-    EOF
-    for i in 1 2 3 4 5 6; do
-      echo "=== attempt $i at $(date -u +%H:%M:%S.%N) ==="
-      rm -f /tmp/diag_loop.qcow2
-      ansible-playbook /tmp/diag_loop.yml -v 2>&1 | grep -E "elapsed|msg|status_code|failed"
-    done
-  register: diag_loop_result
-  changed_when: false
-  ignore_errors: true
-
-- name: DIAGNOSTIC -- print repeated get_url loop output
-  ansible.builtin.debug:
-    var: diag_loop_result.stdout_lines
-
 - name: Load netris-lab variables
   ansible.builtin.include_vars:
     file: "{{ netris_lab_dir }}/group_vars/all.yml"
@@ -61,6 +15,55 @@
 - name: Run prerequisites
   ansible.builtin.include_role:
     name: prerequisites
+
+# TEMPORARY: a 6x repeated get_url loop run BEFORE any prerequisite task
+# had run at all (a prior dispatch) succeeded 6/6 -- ruling out both a
+# request-count/rate-limit theory AND (since two different rmem_default/
+# rmem_max configurations were already tested and disproven) leaving the
+# prerequisites role's OTHER state mutations as the remaining suspects:
+# specifically "Configure libvirt to use nftables backend", "Flush
+# restrictive libvirt nftables chains", and "Masquerade VM bridge traffic
+# for internet access" (NAT/masquerade rules). Repeat the same 6x loop
+# here, right after prerequisites has fully run (all those mutations
+# applied), to see whether failure is now deterministic (100% of 6, likely
+# nftables/NAT being the actual cause) or intermittent (e.g. only fails
+# immediately post-mutation while nftables/conntrack state settles, which
+# would explain why a single post-mutation test failed before while this
+# repeated test might show it clearing up after the first attempt or two).
+# Remove once the real mechanism is confirmed.
+- name: DIAGNOSTIC -- repeated get_url calls after prerequisites has run
+  ansible.builtin.shell: |
+    set -x
+    echo "=== live sysctl/nft state after prerequisites ==="
+    sysctl net.core.rmem_default net.core.rmem_max
+    nft list ruleset 2>&1 | head -100 || echo "(nft not available)"
+    cat > /tmp/diag_loop2.yml <<'EOF'
+    ---
+    - hosts: localhost
+      gather_facts: false
+      connection: local
+      tasks:
+        - ansible.builtin.get_url:
+            url: "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2"
+            dest: "/tmp/diag_loop2.qcow2"
+            mode: '0644'
+            timeout: 10
+          register: r
+          ignore_errors: true
+        - debug: var=r
+    EOF
+    for i in 1 2 3 4 5 6; do
+      echo "=== attempt $i at $(date -u +%H:%M:%S.%N) ==="
+      rm -f /tmp/diag_loop2.qcow2
+      ansible-playbook /tmp/diag_loop2.yml -v 2>&1 | grep -E "elapsed|msg|status_code|failed"
+    done
+  register: diag_loop2_result
+  changed_when: false
+  ignore_errors: true
+
+- name: DIAGNOSTIC -- print repeated get_url loop output (post-prerequisites)
+  ansible.builtin.debug:
+    var: diag_loop2_result.stdout_lines
 
 - name: Cache container and cloud images
   ansible.builtin.include_role:
