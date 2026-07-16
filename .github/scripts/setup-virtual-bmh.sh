@@ -53,13 +53,25 @@ oc wait --for=condition=Ready pods \
   -n openshift-machine-api --timeout=180s
 echo "Ironic is active."
 
-# --- Step 2: Install and start sushy-tools ---
+# --- Step 2: Discover network and gateway IP ---
+echo "==> Discovering cluster-tool network..."
+if ! virsh net-info "${CT_NETWORK}" &>/dev/null; then
+  echo "ERROR: libvirt network '${CT_NETWORK}' not found." >&2
+  echo "Available networks:" >&2
+  virsh net-list --all >&2
+  exit 1
+fi
+
+GW_IP=$(virsh net-dumpxml "${CT_NETWORK}" | grep -oP "address='\K[^']+")
+echo "Gateway IP (host): ${GW_IP}"
+
+# --- Step 3: Install and start sushy-tools ---
 echo "==> Installing sushy-tools..."
 pip install --quiet sushy-tools libvirt-python 2>&1
 
 mkdir -p "${SUSHY_CONFIG_DIR}"
 cat > "${SUSHY_CONFIG_DIR}/sushy-emulator.conf" <<SEOF
-SUSHY_EMULATOR_LISTEN_IP = "0.0.0.0"
+SUSHY_EMULATOR_LISTEN_IP = "${GW_IP}"
 SUSHY_EMULATOR_LISTEN_PORT = ${SUSHY_PORT}
 SUSHY_EMULATOR_SSL_CERT = None
 SUSHY_EMULATOR_SSL_KEY = None
@@ -75,7 +87,7 @@ SUSHY_EMULATOR_BOOT_LOADER_MAP = {
 }
 SEOF
 
-echo "Starting sushy-emulator on port ${SUSHY_PORT}..."
+echo "Starting sushy-emulator on ${GW_IP}:${SUSHY_PORT}..."
 nohup sushy-emulator --config "${SUSHY_CONFIG_DIR}/sushy-emulator.conf" \
   > "${SUSHY_CONFIG_DIR}/sushy.log" 2>&1 &
 echo $! > "${SUSHY_PID_FILE}"
@@ -88,23 +100,8 @@ if ! kill -0 "$(cat "${SUSHY_PID_FILE}")" 2>/dev/null; then
 fi
 echo "sushy-emulator running (PID $(cat "${SUSHY_PID_FILE}"))."
 
-# --- Step 3: Open firewall port ---
-echo "==> Opening firewall port ${SUSHY_PORT}/tcp..."
-if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then
-  sudo firewall-cmd --add-port="${SUSHY_PORT}/tcp" 2>/dev/null || true
-else
-  sudo iptables -I INPUT -p tcp --dport "${SUSHY_PORT}" -j ACCEPT 2>/dev/null || true
-fi
-
 # --- Step 4: Create virtual BMH VMs ---
 echo "==> Creating ${BMH_COUNT} virtual BMH VMs on network ${CT_NETWORK}..."
-
-if ! virsh net-info "${CT_NETWORK}" &>/dev/null; then
-  echo "ERROR: libvirt network '${CT_NETWORK}' not found." >&2
-  echo "Available networks:" >&2
-  virsh net-list --all >&2
-  exit 1
-fi
 
 VM_DISK_DIR="/var/lib/libvirt/images"
 OVMF_CODE="/usr/share/OVMF/OVMF_CODE.secboot.fd"
@@ -159,14 +156,10 @@ done
 
 echo "VMs created: ${VM_NAMES}"
 
-# --- Step 5: Discover gateway IP and VM UUIDs ---
-GW_IP=$(virsh net-dumpxml "${CT_NETWORK}" | grep -oP "address='\K[^']+")
-echo "Gateway IP (host): ${GW_IP}"
-
 # Verify sushy-tools can see the VMs
 echo "Verifying sushy-tools connectivity..."
-curl -sf "http://localhost:${SUSHY_PORT}/redfish/v1/Systems/" > /dev/null \
-  || { echo "ERROR: sushy-tools not responding" >&2; exit 1; }
+curl -sf "http://${GW_IP}:${SUSHY_PORT}/redfish/v1/Systems/" > /dev/null \
+  || { echo "ERROR: sushy-tools not responding at ${GW_IP}:${SUSHY_PORT}" >&2; exit 1; }
 
 # --- Step 6: Create BMH resources ---
 echo "==> Creating BareMetalHost resources in namespace ${BMH_NAMESPACE}..."
