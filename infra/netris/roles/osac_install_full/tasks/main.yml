@@ -159,16 +159,53 @@
     KUBECONFIG: /root/.kube/config
   changed_when: true
 
-- name: Wait for MCP master to finish updating (node reboots on SNO)
+# A single `oc wait --for=condition=Updated` call can itself fail outright
+# (not just time out) if it happens to run while the SNO API server is down
+# mid-reboot -- `oc wait` doesn't tolerate the target going fully
+# unreachable, only slow to converge. Poll with until/retries instead, which
+# ansible retries regardless of whether each individual attempt errored,
+# so a transient connection failure during the reboot window doesn't fail
+# the whole play.
+- name: Wait for MCP master to start updating
   ansible.builtin.command:
-    cmd: oc wait --for=condition=Updated mcp/master --timeout=600s
+    # The whole jsonpath value must stay single-quoted here: ansible's
+    # command module tokenizes cmd with shlex (no shell involved), which
+    # would otherwise strip the double quotes the JSONPath filter
+    # expression needs around "Updating" -- confirmed empirically.
+    cmd: >-
+      oc get mcp/master
+      -o 'jsonpath={.status.conditions[?(@.type=="Updating")].status}'
   environment:
     KUBECONFIG: /root/.kube/config
+  register: _mcp_updating
+  until: _mcp_updating.stdout | default('') | trim == 'True'
+  retries: 30
+  delay: 10
   changed_when: false
 
-- name: Wait 180s for MCP to settle
-  ansible.builtin.pause:
-    seconds: 180
+- name: Wait for MCP master to finish updating (node reboots on SNO, API is briefly unreachable)
+  ansible.builtin.command:
+    cmd: >-
+      oc get mcp/master
+      -o 'jsonpath={.status.conditions[?(@.type=="Updated")].status}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _mcp_updated
+  until: _mcp_updated.stdout | default('') | trim == 'True'
+  retries: 90
+  delay: 10
+  changed_when: false
+
+- name: Wait for node Ready after MCP update
+  ansible.builtin.shell:
+    cmd: oc get nodes --no-headers | grep -q ' Ready'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _node_ready_after_mcp
+  until: _node_ready_after_mcp.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false
 
 - name: Install infra operators (Phase 1)
   ansible.builtin.command:
