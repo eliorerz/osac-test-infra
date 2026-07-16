@@ -28,6 +28,18 @@ if ! [[ "${LOOKBACK_HOURS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "lookback-hours must be a positive integer, got: ${LOOKBACK_HOURS}" >&2
   exit 2
 fi
+# Upper-bounded too, tied to the per_page=100-without-pagination limitation
+# already called out below: an arbitrarily large manual re-audit window
+# makes that deferred gap more likely to actually bite (more runs in-window
+# per target, silently truncated past the first 100). 168h (1 week) is a
+# generous ceiling for a manual catch-up re-scan, not a guarantee that any
+# single target stays under 100 runs within it -- just a sanity bound
+# against a fat-fingered input, since we can't derive a precise hour cap
+# from a run-count without knowing each target's actual run frequency.
+if (( LOOKBACK_HOURS > 168 )); then
+  echo "lookback-hours must be <= 168 (1 week) -- see per_page=100 pagination note below" >&2
+  exit 2
+fi
 mkdir -p "${OUTPUT_DIR}"
 
 SINCE=$(date -u -d "${LOOKBACK_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)
