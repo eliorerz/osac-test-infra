@@ -312,6 +312,37 @@ jobs:
       # were all separate Prow steps too). make e2e INFRA=netris SUITE=caas
       # is the equivalent single-command form if that granularity is ever
       # not wanted.
+      # TEMPORARY: diagnosing a recurring "Connection failure: [ASN1:
+      # NOT_ENOUGH_DATA]" SSL error hitting exactly these two hosts in
+      # setup-infra's cloud-image download step, on every real dispatch so
+      # far -- while quay.io/github.com traffic in the same job succeeds. A
+      # gai.conf IPv4-preference tweak (assuming a broken IPv6 path) did NOT
+      # fix it, and one of the two failing URLs is plain http:// yet still
+      # throws an SSL error, ruling out an address-family explanation
+      # entirely. tooling-check-cmds' own SSH-based checks discard all
+      # output (verify-and-register.sh redirects to /dev/null), so this runs
+      # as a real job step instead, where full curl -v output reaches the
+      # job log. Remove once the real root cause is found and fixed.
+      - name: Diagnose cloud-image download connectivity
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "--- /etc/resolv.conf ---"
+          cat /etc/resolv.conf || true
+          echo "--- proxy-related env vars ---"
+          env | grep -i proxy || echo "(none set)"
+          echo "--- /etc/gai.conf ---"
+          cat /etc/gai.conf || true
+          echo "--- ip route ---"
+          ip route || true
+          for url in \
+            "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2" \
+            "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img"; do
+            echo "=== $url ==="
+            curl -v --max-time 15 -o /dev/null "$url" 2>&1 | tail -60
+            echo
+          done
+
       - name: Setup infra prerequisites (make setup-infra)
         shell: bash
         env:
