@@ -43,6 +43,10 @@ spec:
   watchAllNamespaces: true
 EOF
 
+echo "Waiting for metal3 pods to appear..."
+oc wait --for=create pods \
+  -l baremetal.openshift.io/cluster-baremetal-operator=metal3-state \
+  -n openshift-machine-api --timeout=300s
 echo "Waiting for metal3 pods to be ready..."
 oc wait --for=condition=Ready pods \
   -l baremetal.openshift.io/cluster-baremetal-operator=metal3-state \
