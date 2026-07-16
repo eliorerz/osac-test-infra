@@ -24,25 +24,19 @@
 # tls/certs, /usr/share/ca-certificates/cacert.org, /etc/ansible) for
 # every *.pem/*.crt/*.cer file, reads and concatenates ALL of their
 # extracted PEM blocks, then calls context.load_verify_locations(cadata=
-# <the concatenation>) on the aggregate. A follow-up dispatch confirmed
-# every individual file's own certificate blocks parse fine on their own
-# (no single corrupted cert), but the AGGREGATE concatenation still fails
-# with the exact same ASN1 error -- pointing at a stale/inconsistent
-# CA-trust extraction (e.g. from EPEL/package installs earlier in
-# prerequisites triggering a partial or interrupted update-ca-trust run),
-# not a single bad file. update-ca-trust extract is the standard, safe,
-# idempotent RHEL/Fedora command to regenerate the extracted CA bundles
-# from scratch; run it here (our own code, not the vendored role) right
-# after prerequisites and before the cache role's get_url task needs a
-# working CA store.
-- name: Regenerate CA trust bundles (works around a stale/partial extraction left by prerequisites)
-  ansible.builtin.command:
-    cmd: update-ca-trust extract
-  changed_when: true
-
-# TEMPORARY: verify the fix above actually resolves the aggregate parsing
-# failure before removing this diagnostic.
-- name: DIAGNOSTIC -- pinpoint the corrupted CA cert file get_ca_certs() aggregates
+# <the concatenation>) on the aggregate.
+#
+# update-ca-trust extract (regenerating the CA bundles from scratch) was
+# tried and did NOT fix it -- ruling out a stale/partial extraction.
+# Also: ssl.PEM_cert_to_DER_cert() only base64-decodes a PEM block, it
+# does NOT validate the result is a well-formed X.509 DER structure --
+# so the earlier "every file's blocks parse fine" check was a weak
+# signal that never actually caught the real problem. Test each
+# individual certificate the way OpenSSL actually validates it: load it
+# alone via ssl.SSLContext.load_verify_locations(cadata=<one DER blob>),
+# to find exactly which cert (if any) is malformed at the ASN.1 level,
+# not just "does base64-decoding succeed".
+- name: DIAGNOSTIC -- validate each individual CA cert via the real OpenSSL parser
   ansible.builtin.shell: |
     set -x
     cat > /tmp/diag_find_bad_cert.py <<'EOF'
@@ -56,49 +50,43 @@
         '/usr/share/ca-certificates/cacert.org',
         '/etc/ansible',
     ]
-    all_certs = []
+    all_ders = []
     for path in paths:
         if not os.path.isdir(path):
-            print('SKIP (not a dir):', path)
             continue
         for f in sorted(os.listdir(path)):
             full_path = os.path.join(path, f)
             if not os.path.isfile(full_path) or os.path.splitext(f)[1] not in ('.pem', '.cer', '.crt'):
                 continue
-            size = os.path.getsize(full_path)
             try:
                 with open(full_path, 'r', errors='surrogateescape') as fh:
                     content = fh.read()
-                blocks = PEM_RE.findall(content)
-                n_ok = 0
-                for pem in blocks:
-                    try:
-                        der = ssl.PEM_cert_to_DER_cert(pem)
-                        all_certs.append(der)
-                        n_ok += 1
-                    except Exception as e:
-                        print('BAD CERT BLOCK in', full_path, 'size=%d' % size, '->', repr(e))
-                print('OK', full_path, 'size=%d' % size, 'blocks=%d' % len(blocks), 'parsed_ok=%d' % n_ok)
-            except Exception as e:
-                print('READ FAILED', full_path, 'size=%d' % size, '->', repr(e))
+            except Exception:
+                continue
+            for idx, pem in enumerate(PEM_RE.findall(content)):
+                try:
+                    der = ssl.PEM_cert_to_DER_cert(pem)
+                except Exception:
+                    continue
+                all_ders.append((full_path, idx, der))
 
-    print('=== aggregate load_verify_locations() test, exactly like make_context() does ===')
-    try:
-        cadata = bytearray()
-        for der in all_certs:
-            cadata.extend(der)
-        ctx = ssl.create_default_context()
-        ctx.load_verify_locations(cadata=cadata)
-        print('load_verify_locations() on the aggregate of', len(all_certs), 'certs SUCCEEDED')
-    except Exception as e:
-        print('load_verify_locations() on the aggregate FAILED ->', repr(e))
+    print('total candidate certs:', len(all_ders))
+    n_bad = 0
+    for full_path, idx, der in all_ders:
+        try:
+            ctx = ssl.create_default_context()
+            ctx.load_verify_locations(cadata=der)
+        except Exception as e:
+            n_bad += 1
+            print('REAL PARSE FAILURE:', full_path, 'block#%d' % idx, 'size=%d' % len(der), '->', repr(e))
+    print('done, bad certs found:', n_bad)
     EOF
     python3 /tmp/diag_find_bad_cert.py 2>&1
   register: diag_findbad_result
   changed_when: false
   ignore_errors: true
 
-- name: DIAGNOSTIC -- print corrupted-CA-file pinpoint output
+- name: DIAGNOSTIC -- print per-cert validation output
   ansible.builtin.debug:
     var: diag_findbad_result.stdout_lines
 
