@@ -314,17 +314,19 @@ jobs:
       # first on that theory and confirmed NOT to fix it). A live diagnostic
       # dispatch proved the network itself is fine: plain `curl` against the
       # exact same URL, from the exact same box, in the same job run,
-      # succeeded immediately at 40+MB/s -- so the failure is specific to
-      # get_url's own Python-based request handling, not connectivity, DNS,
-      # or a proxy. Reproducing the same get_url task locally (a different
-      # network/host entirely) succeeded cleanly, so this isn't a universal
-      # ansible bug either -- it's specific to something about this box's
-      # ansible/python/openssl install (tooling-check-cmds installs BOTH
-      # dnf's ansible-core AND `pip3 install ansible` on top of it, a
-      # plausible source of a version/library mismatch). Gather concrete
-      # version info and reproduce get_url in isolation (outside the real
-      # cache role) to find the actual mechanism before changing anything.
-      - name: Diagnose get_url SSL failure (isolated repro)
+      # succeeded immediately at 40+MB/s. A follow-up dispatch confirmed the
+      # box's ansible-core is the pip-installed 2.15.13 (not dnf's packaged
+      # 2.14.18 -- /usr/local/bin wins on PATH), but an isolated get_url
+      # repro using that exact toolchain ALSO succeeded cleanly here --
+      # ruling out the dual-install/version-mismatch theory too. The
+      # difference: this repro runs in a clean pre-state, before
+      # prerequisites' nftables backend switch, VM-bridge NAT/masquerade
+      # rules, and rmem_default sysctl change have applied -- while the real
+      # failing task runs after all of that, in the same play. Keep this
+      # pre-mutation repro as a baseline and add a post-mutation one (right
+      # where the real failure happens) to test whether one of those state
+      # changes is the actual cause.
+      - name: Diagnose get_url SSL failure (pre-mutation baseline repro)
         shell: bash
         continue-on-error: true
         run: |
@@ -334,6 +336,9 @@ jobs:
           pip3 show ansible ansible-core 2>&1 || true
           command -v ansible-playbook
           python3 -c "import ssl; print('OpenSSL:', ssl.OPENSSL_VERSION)"
+          echo "--- baseline sysctl/nft state (pre-mutation) ---"
+          sysctl net.core.rmem_default net.core.rmem_max 2>&1 || true
+          nft list ruleset 2>&1 | head -100 || echo "(nft not available or empty ruleset)"
           echo "--- isolated get_url repro (outside the vendored cache role) ---"
           cat > /tmp/get_url_repro.yml <<'EOF'
           ---
@@ -358,6 +363,45 @@ jobs:
         env:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
         run: make setup-infra INFRA=netris SUITE=caas EXTRA_VARS="${EXTRA_VARS}"
+
+      # Only runs if the step above failed -- by this point, prerequisites'
+      # nftables backend switch, VM-bridge NAT/masquerade rules, and
+      # rmem_default sysctl change have already applied (they run earlier in
+      # the same ansible play, before the cache role's get_url task). If
+      # this repro NOW reproduces the same SSL failure (it succeeded in the
+      # pre-mutation baseline above), one of those state changes is the
+      # actual cause; if it still succeeds, the cause is something else
+      # entirely (e.g. concurrency/timing specific to the real play, or
+      # something about looping over two items in a single get_url task).
+      - name: Diagnose get_url SSL failure (post-mutation repro)
+        if: failure()
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "--- sysctl/nft state after prerequisites has run ---"
+          sysctl net.core.rmem_default net.core.rmem_max 2>&1 || true
+          nft list ruleset 2>&1 | head -150 || echo "(nft not available or empty ruleset)"
+          echo "--- curl retest (post-mutation) ---"
+          curl -v --max-time 20 -o /dev/null -r 0-10000000 \
+            "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2" 2>&1 | tail -40
+          echo "--- isolated get_url repro (post-mutation, outside the vendored cache role) ---"
+          cat > /tmp/get_url_repro2.yml <<'EOF'
+          ---
+          - hosts: localhost
+            gather_facts: false
+            connection: local
+            tasks:
+              - name: Repro cumulus download
+                ansible.builtin.get_url:
+                  url: "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2"
+                  dest: "/tmp/get_url_repro_cumulus2.qcow2"
+                  mode: '0644'
+                  timeout: 10
+                register: result
+                ignore_errors: true
+              - debug: var=result
+          EOF
+          ansible-playbook /tmp/get_url_repro2.yml -vvv 2>&1 | tail -150
 
       - name: Deploy Netris lab (make deploy-infra)
         shell: bash
