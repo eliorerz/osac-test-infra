@@ -228,7 +228,7 @@ for VM_NAME in ${VM_NAMES}; do
   echo "  Waiting for ${VM_NAME}..."
   # BMHs go through: registering → inspecting → available
   # Inspection with virtual BMHs typically takes 3-5 minutes.
-  RETRIES=60
+  RETRIES=120
   DELAY=10
   for attempt in $(seq 1 "${RETRIES}"); do
     STATE=$(oc get bmh "${VM_NAME}" -n "${BMH_NAMESPACE}" \
