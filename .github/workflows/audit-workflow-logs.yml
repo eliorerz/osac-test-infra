@@ -15,8 +15,15 @@ concurrency:
   group: audit-workflow-logs
   cancel-in-progress: false
 
+# Deny-by-default at the workflow level, so a future job added to this file
+# without its own explicit `permissions:` block gets nothing rather than a
+# broad implicit GITHUB_TOKEN scope -- the job below already sets its own
+# least-privilege block regardless, this is just the safety net for later.
+permissions: {}
+
 jobs:
   audit:
+    name: Cross-repo credential audit
     # workflow_dispatch lets anyone with write access pick *any* branch to
     # run this job against, executing that branch's own copy of this file
     # with this job's full Vault/GH_ORG_TOKEN access -- a same-file `if:`
@@ -34,12 +41,15 @@ jobs:
     # scan itself needs no cluster access.
     runs-on: osac-ci
     permissions:
-      contents: read
+      # Only needed to check out the shared scripts (scan-run-logs.sh,
+      # discover-e2e-runs.sh) this job invokes -- this job never pushes
+      # back to the repo.
+      contents: read  # checkout only, no push
       # The tracking issue lives in this repo, so issues:write is enough at
       # the job-permissions level for that part. Cross-repo run listing and
       # log fetch/delete use the org-scoped GH_ORG_TOKEN from Vault instead
       # (see "Scan each run's logs" below), not this job's own token.
-      issues: write
+      issues: write  # create/update the credential-leak tracking issue
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

@@ -27,13 +27,22 @@ concurrency:
   group: scan-e2e-logs-${{ github.event.workflow_run.id }}
   cancel-in-progress: false
 
+# Deny-by-default at the workflow level, so a future job added to this file
+# without its own explicit `permissions:` block gets nothing rather than a
+# broad implicit GITHUB_TOKEN scope -- the job below already sets its own
+# least-privilege block regardless, this is just the safety net for later.
+permissions: {}
+
 jobs:
   scan-logs:
+    name: Scan and purge run logs
     runs-on: osac-ci
     permissions:
-      contents: read
+      # Only needed to check out the local composite action definition
+      # (`uses: ./...` below) -- this job never pushes back to the repo.
+      contents: read  # checkout only, no push
       # Fetching and deleting the completed run's logs needs actions:write.
-      actions: write
+      actions: write  # fetch/delete completed run's logs
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
