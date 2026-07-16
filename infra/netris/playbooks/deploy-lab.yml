@@ -1,29 +1,16 @@
 ---
-# module_defaults below works around the same confirmed root cause hit in
-# setup-infra (see infra/netris/playbooks/setup.yml's own comment):
-# netris-lab's prerequisites role drags in a real openssl-libs upgrade
-# (3.2.2 -> 3.5.5) that breaks Python's ssl.SSLContext.
-# load_verify_locations(cadata=...) bytes-based CA-cert loading path.
-# ansible.builtin.uri shares this exact broken code path with get_url
-# (both are built on ansible.module_utils.urls.fetch_url()) -- confirmed
-# via a real dispatch: netris-lab's vendored k3s_controller role's
-# "Verify controller API" task (a plain http://localhost/... health
-# check, not even real TLS) failed with the identical "Connection
-# failure: [ASN1: NOT_ENOUGH_DATA]" error.
-#
-# Unlike get_url, ansible.builtin.uri actually exposes a working ca_path
-# parameter that's correctly threaded through to fetch_url() (verified
-# directly in the ansible-core source and by testing it locally against a
-# real HTTPS endpoint). Setting it here routes uri through
-# ssl.create_default_context(cafile=ca_path) -- the plain, working,
-# file-based path -- instead of the broken cadata aggregation, with full
-# certificate validation preserved throughout.
+# The one uri/get_url call in this play's roles (netris-lab's vendored
+# k3s_controller role's "Verify controller API" task) hits the same OpenSSL
+# CA-cert-loading bug documented in setup.yml's own comment. That fix is
+# scoped at the block level in roles/lab_deploy/tasks/main.yml (around just
+# the k3s_controller include) rather than here at the play level -- see that
+# file's comment for the full root-cause explanation, including why a
+# play-level ca_path default (tried first) still failed identically in a
+# real dispatch, and why validate_certs: false is safe there (the target is
+# plain http://, no TLS handshake ever occurs).
 - name: Deploy Netris lab
   hosts: all
   gather_facts: true
   become: true
-  module_defaults:
-    ansible.builtin.uri:
-      ca_path: /etc/pki/tls/certs/ca-bundle.crt
   roles:
     - lab_deploy
