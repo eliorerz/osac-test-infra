@@ -8,9 +8,9 @@
 # mce.enabled/cnv.enabled correctly, so there's nothing here that benefits
 # from ansible's idempotency machinery beyond what Helm's own
 # --wait/--wait-for-jobs already provides. kubeconfig is already in place at
-# /root/.kube/config by this point -- roles/ocp_install (part of deploy-ocp,
-# which always runs before this role) downloads it once the OCP install
-# finishes.
+# /root/.kube/config by this point -- roles/restore-snapshot (part of
+# restore-ocp-snapshot, which always runs before this role) writes it once
+# the restored, bare-OCP-only snapshot's cluster comes up healthy.
 
 - name: Remove any previous osac-installer-full checkout
   ansible.builtin.file:
@@ -96,6 +96,79 @@
         dest: "{{ osac_installer_full_dir }}/{{ snapshot_osac_values_file }}"
         content: "{{ _values_raw.content | b64decode | from_yaml | combine(_image_overrides, recursive=true) | to_nice_yaml(indent=2) }}"
         mode: "0644"
+
+# The sno-4-19-ps flavor is bare OpenShift restored via restore-snapshot's
+# recert mechanism, not installed via roles/ocp_install's Assisted-Installer
+# manifest injection -- so it never gets the maxPods bump that path applies
+# at install time. e2e-vmaas-full-install.yml already boots this exact same
+# flavor and found these three prerequisites necessary before its own
+# install-operators call would succeed; matching them verbatim rather than
+# discovering each one the hard way again.
+- name: Wait for CatalogSource redhat-operators to be READY
+  ansible.builtin.command:
+    cmd: >-
+      oc wait --for=jsonpath='{.status.connectionState.lastObservedState}'=READY
+      catalogsource/redhat-operators -n openshift-marketplace --timeout=300s
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
+- name: Patch OVN masquerade subnet to avoid networking conflicts
+  ansible.builtin.command:
+    cmd: >-
+      oc patch networks.operator.openshift.io cluster --type=merge
+      -p '{"spec":{"defaultNetwork":{"ovnKubernetesConfig":{"gatewayConfig":{"ipv4":{"internalMasqueradeSubnet":"169.254.0.0/17"}}}}}}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: true
+
+- name: Restart network-operator to pick up the OVN masquerade subnet patch
+  ansible.builtin.command:
+    cmd: oc delete pod -n openshift-network-operator -l name=network-operator
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: true
+
+- name: Wait 180s for OVN to stabilize
+  ansible.builtin.pause:
+    seconds: 180
+
+- name: Wait for ovnkube-node rollout
+  ansible.builtin.command:
+    cmd: oc rollout status ds/ovnkube-node -n openshift-ovn-kubernetes --timeout=300s
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
+- name: Apply KubeletConfig to increase maxPods to 500
+  ansible.builtin.shell:
+    cmd: |
+      oc apply -f - <<'KUBELET_EOF'
+      apiVersion: machineconfiguration.openshift.io/v1
+      kind: KubeletConfig
+      metadata:
+        name: set-master-max-pods
+      spec:
+        machineConfigPoolSelector:
+          matchLabels:
+            pools.operator.machineconfiguration.openshift.io/master: ""
+        kubeletConfig:
+          maxPods: 500
+      KUBELET_EOF
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: true
+
+- name: Wait for MCP master to finish updating (node reboots on SNO)
+  ansible.builtin.command:
+    cmd: oc wait --for=condition=Updated mcp/master --timeout=600s
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
+- name: Wait 180s for MCP to settle
+  ansible.builtin.pause:
+    seconds: 180
 
 - name: Install infra operators (Phase 1)
   ansible.builtin.command:

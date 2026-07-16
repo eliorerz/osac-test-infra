@@ -66,9 +66,16 @@ osac_aap_repo: "https://github.com/osac-project/osac-aap.git"
 osac_aap_branch: ""
 osac_aap_image: ""
 
-# Snapshot-based deployment (fast path)
-snapshot_flavor_image: "quay.io/rh-ee-ovishlit/cluster-flavors:caas"
-snapshot_flavor_dir: "/var/cache/netris-lab/cluster-flavors/caas"
+# Snapshot-based deployment (fast path): restore a pre-installed OCP-only
+# cluster from a cluster-tool-format flavor image rather than genuinely
+# installing OCP from scratch via Assisted Installer. sno-4.19-x86_64 is in
+# the same quay.io/osac-project/cluster-flavors repo as the retired
+# cluster-flavors:caas image (sibling tags: sno-caas-4.19-x86_64,
+# sno-vmaas-4.19-x86_64), confirmed publicly pullable with no registry auth
+# needed (unlike quay.io/rh-ee-ovishlit's flavors). No OSAC baked in here,
+# so deploy-osac-full's fresh Helm install runs against a bare cluster.
+snapshot_flavor_image: "quay.io/osac-project/cluster-flavors:sno-4.19-x86_64"
+snapshot_flavor_dir: "/var/cache/netris-lab/cluster-flavors/sno-4-19-x86_64"
 snapshot_recert_image: "quay.io/rh-ee-ovishlit/recert:latest"
 # Also used by roles/osac_install_full and roles/caas_setup/caas_discovery,
 # not just the snapshot-refresh path -- despite the name, this is the single

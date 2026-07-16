@@ -173,13 +173,22 @@ jobs:
 
   test:
     needs: [provision, push-secrets]
-    # 360m (6h): the real CaaS/Netris flow's own Prow step timeouts summed
-    # to lab-setup(30m)+lab-deploy(90m)+lab-snapshot(3h)+caas-setup(45m)+
-    # caas-deploy(90m) -- several hours in the worst case. Self-hosted
-    # runners aren't bound by GitHub-hosted runners' 6h job cap, so this is
-    # just an explicit upper bound, not a platform limit.
+    # 240m (4h): a hard fail-fast ceiling, not a worst-case budget sum. A
+    # real dispatch of the OCP-from-scratch (Assisted Installer) path once
+    # silently sat in a many-hours-long ansible retry loop with no visible
+    # progress in the logs, burning EC2 cost the whole time -- capping this
+    # means a similarly-silent hang fails the job within a bounded window
+    # instead of running for hours undetected. 120m was tried first but was
+    # too tight: a real dispatch showed deploy-infra (the netris-lab
+    # simulation deploy) alone legitimately running past 100 minutes with
+    # no problem, before deploy-osac even starts -- 240m leaves real room
+    # for deploy-infra's own variance plus deploy-osac's install-operators/
+    # prereqs/osac phases plus caas setup/deploy/tests, while still being
+    # far short of the original 360m (6h) that let a genuine hang run
+    # undetected for multiple hours. Revisit again if a real dispatch shows
+    # this still isn't enough.
     runs-on: ${{ needs.provision.outputs.runner-label }}
-    timeout-minutes: 360
+    timeout-minutes: 240
     permissions:
       contents: read
     outputs:
@@ -308,7 +317,7 @@ jobs:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
         run: make deploy-infra INFRA=netris SUITE=caas EXTRA_VARS="${EXTRA_VARS}"
 
-      - name: Deploy OSAC from snapshot (make deploy-osac)
+      - name: Deploy OCP (from snapshot) + OSAC (fresh install, make deploy-osac)
         shell: bash
         env:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
