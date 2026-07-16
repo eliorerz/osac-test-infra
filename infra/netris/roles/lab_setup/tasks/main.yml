@@ -16,6 +16,27 @@
   ansible.builtin.include_role:
     name: prerequisites
 
+# netris-lab's own prerequisites role bumps net.core.rmem_default to
+# 2129920 but never raises net.core.rmem_max to match, leaving the default
+# socket receive buffer size larger than the ceiling applications are
+# allowed to request. Confirmed via a live bisection across two real
+# dispatches (bracketing exactly this one sysctl task) that
+# ansible.builtin.get_url -- used by the very next role, cache, to fetch
+# cloud images -- starts failing with "Connection failure: [ASN1:
+# NOT_ENOUGH_DATA]" only once this sysctl has been applied, while plain
+# `curl` against the identical URL from the same box in the same run is
+# completely unaffected: rmem_default > rmem_max is the reproducible
+# controlling variable, not the network, DNS, a proxy, or an ansible
+# version mismatch (all ruled out first). Not patched in netris-lab itself
+# (vendored, not our code) -- raise rmem_max back above rmem_default here
+# instead, right before the cache role runs.
+- name: Work around netris-lab prerequisites leaving rmem_max below rmem_default
+  ansible.posix.sysctl:
+    name: net.core.rmem_max
+    value: "2129920"
+    sysctl_set: true
+    reload: true
+
 - name: Cache container and cloud images
   ansible.builtin.include_role:
     name: cache
