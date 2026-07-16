@@ -18,56 +18,65 @@
 
 # TEMPORARY: confirmed via prior dispatches -- get_url before prerequisites
 # succeeds; after prerequisites it fails deterministically with "Connection
-# failure: [ASN1: NOT_ENOUGH_DATA]"; nftables/NAT and rmem_default/rmem_max
-# sysctl are both ruled out. Raw Python replicating ansible's exact
-# open_url() logic (SSLContext + global HTTPSHandler opener install +
-# custom "ansible-httpget" User-Agent, all three combined) succeeds fine
-# when run from /tmp -- ruling out open_url()'s own logic as the cause too.
-# The one remaining, untested difference: ansible.module_utils.urls.
-# fetch_url() (the real caller inside get_url.py) redirects Python's global
-# tempfile.tempdir to module.tmpdir before calling open_url() -- and the
-# real AnsiballZ module script itself executes from under
-# /root/.ansible/tmp/ansible-tmp-*, not /tmp. This is a SELinux-enforcing
-# RHEL box (prerequisites explicitly disables SELinux for libvirt qemu,
-# implying it's enabled/enforcing for everything else); /root/.ansible/tmp
-# may carry a different SELinux context than /tmp. Test whether merely
-# running the exact same raw-Python replica FROM that directory (with
-# tempfile.tempdir redirected there too, matching fetch_url() exactly)
-# reproduces the failure. Remove once the real mechanism is confirmed.
-- name: DIAGNOSTIC -- test from an ansible-tmp-style directory, matching fetch_url() exactly
+# failure: [ASN1: NOT_ENOUGH_DATA]"; nftables/NAT, rmem_default/rmem_max
+# sysctl, and SELinux context/tempfile.tempdir under /root/.ansible/tmp are
+# all ruled out (a raw-Python replica of open_url()'s exact logic succeeds
+# even run from that exact directory with that exact context). Every
+# code-level difference in open_url() itself (SSLContext + global
+# HTTPSHandler opener + custom User-Agent) has been replicated and still
+# succeeds as a bare script. The one thing no raw-script replica can
+# reproduce: actually executing inside a real ansible.module_utils.basic.
+# AnsibleModule instance (the harness get_url.py itself runs inside,
+# created before get_url's own body ever calls fetch_url()/open_url()).
+# Test that directly with a minimal custom module that does nothing but
+# instantiate a real AnsibleModule and then call open_url() -- with a raw
+# try/except that captures the FULL traceback, since fetch_url()'s own
+# `except socket.error` handler (confirmed in the ansible-core source to
+# be what produces "Connection failure: ...") discards the traceback,
+# hiding exactly where in the call stack the error originates. Remove once
+# the real mechanism is confirmed.
+- name: DIAGNOSTIC -- run open_url() inside a real AnsibleModule harness
   ansible.builtin.shell: |
     set -x
-    echo "=== SELinux enforcement status ==="
-    getenforce || echo "(getenforce not available)"
-    echo "=== recent AVC denials, if any ==="
-    ausearch -m avc -ts recent 2>&1 | tail -40 || echo "(ausearch not available or no denials)"
-    echo "=== security context comparison: /tmp vs an ansible-tmp-style dir ==="
-    mkdir -p /root/.ansible/tmp/diag-ansible-tmp-test
-    ls -Zd /tmp /root/.ansible/tmp/diag-ansible-tmp-test
-    echo "=== raw Python replica of open_url(), executed FROM /root/.ansible/tmp/..., with tempfile.tempdir redirected there too (matches fetch_url() exactly) ==="
-    cat > /root/.ansible/tmp/diag-ansible-tmp-test/diag_test_d.py <<'EOF'
-    import urllib.request, ssl, tempfile, traceback
-    tempfile.tempdir = '/root/.ansible/tmp/diag-ansible-tmp-test'
-    context = ssl.create_default_context()
-    handlers = [urllib.request.HTTPSHandler(context=context)]
-    opener = urllib.request.build_opener(*handlers)
-    urllib.request.install_opener(opener)
-    try:
-        req = urllib.request.Request('http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2')
-        req.add_header('User-agent', 'ansible-httpget')
-        r = urllib.request.urlopen(req, timeout=10)
-        print('SUCCESS', r.status, len(r.read(1024)))
-    except Exception:
-        traceback.print_exc()
+    mkdir -p /tmp/diag_library
+    cat > /tmp/diag_library/diag_open_url_test.py <<'EOF'
+    #!/usr/bin/python
+    from ansible.module_utils.basic import AnsibleModule
+    from ansible.module_utils.urls import open_url
+    import traceback
+
+    def main():
+        module = AnsibleModule(argument_spec=dict(url=dict(type='str', required=True)))
+        try:
+            r = open_url(module.params['url'], method='GET', timeout=10, http_agent='ansible-httpget')
+            module.exit_json(changed=False, status=r.status, size=len(r.read(1024)))
+        except Exception as e:
+            module.exit_json(changed=False, failed=True, msg=str(e), full_traceback=traceback.format_exc())
+
+    if __name__ == '__main__':
+        main()
     EOF
-    cd /root/.ansible/tmp/diag-ansible-tmp-test && python3 diag_test_d.py 2>&1
-  register: diag_selinux_result
+    cat > /tmp/diag_ansible_module_test.yml <<'EOF'
+    ---
+    - hosts: localhost
+      gather_facts: false
+      connection: local
+      tasks:
+        - diag_open_url_test:
+            url: "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2"
+          register: r
+          ignore_errors: true
+        - debug: var=r
+    EOF
+    echo "=== real AnsibleModule harness + open_url(), full traceback on failure ==="
+    ANSIBLE_LIBRARY=/tmp/diag_library ansible-playbook /tmp/diag_ansible_module_test.yml -v 2>&1 | tail -60
+  register: diag_module_result
   changed_when: false
   ignore_errors: true
 
-- name: DIAGNOSTIC -- print SELinux/ansible-tmp-directory test output
+- name: DIAGNOSTIC -- print AnsibleModule harness test output
   ansible.builtin.debug:
-    var: diag_selinux_result.stdout_lines
+    var: diag_module_result.stdout_lines
 
 - name: Cache container and cloud images
   ansible.builtin.include_role:
