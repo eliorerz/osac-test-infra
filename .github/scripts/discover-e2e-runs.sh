@@ -19,6 +19,15 @@ set -euo pipefail
 LOOKBACK_HOURS="${1:?Usage: discover-e2e-runs.sh <lookback-hours> <output-dir>}"
 OUTPUT_DIR="${2:?Usage: discover-e2e-runs.sh <lookback-hours> <output-dir>}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
+# workflow_dispatch's lookback-hours input is user-supplied and unvalidated
+# at that point -- 0, a negative number, or non-numeric text would all
+# produce a bad or empty `date` result below, silently auditing an
+# incorrect (possibly empty) window while still reporting a "successful"
+# run. Fail loudly on a malformed value instead of letting it flow through.
+if ! [[ "${LOOKBACK_HOURS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "lookback-hours must be a positive integer, got: ${LOOKBACK_HOURS}" >&2
+  exit 2
+fi
 mkdir -p "${OUTPUT_DIR}"
 
 SINCE=$(date -u -d "${LOOKBACK_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)
@@ -66,8 +75,13 @@ fi
 # can't be inferred from SKIPPED_TARGETS staying 0 -- the caller must check
 # this flag too, or a clean-looking audit could just be an incomplete one.
 DISCOVERY_FAILED=false
-if [[ "${HTTP_CODE}" != "200" ]]; then
-  echo "::warning::Cross-repo caller discovery failed (HTTP ${HTTP_CODE}); auditing only this repo's own runs this time."
+# A 200 doesn't guarantee the body has the shape we expect -- `.items[]?`'s
+# `?` turns a missing/wrong-typed field into empty output just as readily as
+# a genuinely-empty result, so a malformed response (rate-limit body with a
+# 200, an API shape change, etc.) would otherwise look identical to "found
+# zero cross-repo callers" instead of a real discovery failure.
+if [[ "${HTTP_CODE}" != "200" ]] || ! jq -e '.items | type == "array"' "${DISCOVER_RESP}" >/dev/null 2>&1; then
+  echo "::warning::Cross-repo caller discovery failed (HTTP ${HTTP_CODE}, or unexpected response shape); auditing only this repo's own runs this time."
   DISCOVERY_FAILED=true
 else
   while IFS= read -r TARGET; do
@@ -97,8 +111,12 @@ for TARGET in "${TARGETS[@]}"; do
     "${GITHUB_API_URL}/repos/${REPO}/actions/workflows/${WORKFLOW}/runs?status=completed&per_page=100"); then
     HTTP_CODE="curl-transport-error"
   fi
-  if [[ "${HTTP_CODE}" != "200" ]]; then
-    echo "::warning::Could not list runs for ${TARGET} (HTTP ${HTTP_CODE}), skipping."
+  # Same "200 doesn't guarantee shape" reasoning as the discovery call above
+  # -- an unexpected/missing .workflow_runs would otherwise become `[]` via
+  # `?`, silently counting a target that actually has runs as cleanly
+  # audited instead of skipped.
+  if [[ "${HTTP_CODE}" != "200" ]] || ! jq -e '.workflow_runs | type == "array"' "${RESP_FILE}" >/dev/null 2>&1; then
+    echo "::warning::Could not list runs for ${TARGET} (HTTP ${HTTP_CODE}, or unexpected response shape), skipping."
     SKIPPED_TARGETS=$((SKIPPED_TARGETS + 1))
     continue
   fi
