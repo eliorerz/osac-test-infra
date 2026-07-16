@@ -1,4 +1,50 @@
 ---
+# TEMPORARY: a real dispatch showed EVERY individual CA certificate (all
+# 701 candidates, not just one bad one) fails identically when loaded via
+# ssl.SSLContext.load_verify_locations(cadata=<one DER blob>) -- meaning
+# the cadata-based loading API itself appears broken post-prerequisites,
+# for any input, not the certificate data. Since raw Python succeeds by
+# using ssl.create_default_context()'s own file-based default lookup
+# (never exercising the cadata= code path), and real get_url calls
+# succeeded before any prerequisite task ran, something changes the
+# cadata-loading behavior specifically -- most likely a system openssl-libs
+# version change triggered by EPEL/package installs earlier in
+# prerequisites. Capture OpenSSL version and a minimal cadata sanity check
+# BEFORE prerequisites runs, for direct comparison against the same
+# post-prerequisites check already in this file. Remove once the real
+# mechanism is confirmed.
+- name: DIAGNOSTIC -- OpenSSL version and cadata sanity check before prerequisites
+  ansible.builtin.shell: |
+    set -x
+    openssl version
+    rpm -q openssl-libs
+    python3 -c "import ssl; print('python ssl.OPENSSL_VERSION:', ssl.OPENSSL_VERSION)"
+    python3 -c "
+    import ssl, glob
+    for f in glob.glob('/etc/pki/ca-trust/extracted/pem/*.pem'):
+        with open(f, 'r', errors='surrogateescape') as fh:
+            content = fh.read()
+        import re
+        m = re.search(r'-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----', content, re.DOTALL)
+        if not m:
+            continue
+        der = ssl.PEM_cert_to_DER_cert(m.group(0))
+        try:
+            ctx = ssl.create_default_context()
+            ctx.load_verify_locations(cadata=der)
+            print('cadata sanity check on', f, 'SUCCEEDED')
+        except Exception as e:
+            print('cadata sanity check on', f, 'FAILED ->', repr(e))
+        break
+    "
+  register: diag_preprereq_result
+  changed_when: false
+  ignore_errors: true
+
+- name: DIAGNOSTIC -- print pre-prerequisites OpenSSL/cadata check
+  ansible.builtin.debug:
+    var: diag_preprereq_result.stdout_lines
+
 - name: Load netris-lab variables
   ansible.builtin.include_vars:
     file: "{{ netris_lab_dir }}/group_vars/all.yml"
@@ -16,79 +62,39 @@
   ansible.builtin.include_role:
     name: prerequisites
 
-# Root cause confirmed via a real dispatch. The full traceback (captured
-# by running open_url() inside a genuine AnsibleModule instance) shows the
-# error is NOT in the network/TLS handshake at all -- it's in
-# make_context() -> get_ca_certs(), which (since get_url passes no cafile)
-# scans several directories (/etc/pki/ca-trust/extracted/pem, /etc/pki/
-# tls/certs, /usr/share/ca-certificates/cacert.org, /etc/ansible) for
-# every *.pem/*.crt/*.cer file, reads and concatenates ALL of their
-# extracted PEM blocks, then calls context.load_verify_locations(cadata=
-# <the concatenation>) on the aggregate.
-#
-# update-ca-trust extract (regenerating the CA bundles from scratch) was
-# tried and did NOT fix it -- ruling out a stale/partial extraction.
-# Also: ssl.PEM_cert_to_DER_cert() only base64-decodes a PEM block, it
-# does NOT validate the result is a well-formed X.509 DER structure --
-# so the earlier "every file's blocks parse fine" check was a weak
-# signal that never actually caught the real problem. Test each
-# individual certificate the way OpenSSL actually validates it: load it
-# alone via ssl.SSLContext.load_verify_locations(cadata=<one DER blob>),
-# to find exactly which cert (if any) is malformed at the ASN.1 level,
-# not just "does base64-decoding succeed".
-- name: DIAGNOSTIC -- validate each individual CA cert via the real OpenSSL parser
+# TEMPORARY: comparison point -- see the DIAGNOSTIC task above (before
+# prerequisites) for the same OpenSSL version/cadata sanity check.
+- name: DIAGNOSTIC -- OpenSSL version and cadata sanity check after prerequisites
   ansible.builtin.shell: |
     set -x
-    cat > /tmp/diag_find_bad_cert.py <<'EOF'
-    import os, re, ssl
-
-    PEM_RE = re.compile(r'-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----', re.DOTALL)
-
-    paths = [
-        '/etc/pki/ca-trust/extracted/pem',
-        '/etc/pki/tls/certs',
-        '/usr/share/ca-certificates/cacert.org',
-        '/etc/ansible',
-    ]
-    all_ders = []
-    for path in paths:
-        if not os.path.isdir(path):
+    openssl version
+    rpm -q openssl-libs
+    python3 -c "import ssl; print('python ssl.OPENSSL_VERSION:', ssl.OPENSSL_VERSION)"
+    python3 -c "
+    import ssl, glob
+    for f in glob.glob('/etc/pki/ca-trust/extracted/pem/*.pem'):
+        with open(f, 'r', errors='surrogateescape') as fh:
+            content = fh.read()
+        import re
+        m = re.search(r'-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----', content, re.DOTALL)
+        if not m:
             continue
-        for f in sorted(os.listdir(path)):
-            full_path = os.path.join(path, f)
-            if not os.path.isfile(full_path) or os.path.splitext(f)[1] not in ('.pem', '.cer', '.crt'):
-                continue
-            try:
-                with open(full_path, 'r', errors='surrogateescape') as fh:
-                    content = fh.read()
-            except Exception:
-                continue
-            for idx, pem in enumerate(PEM_RE.findall(content)):
-                try:
-                    der = ssl.PEM_cert_to_DER_cert(pem)
-                except Exception:
-                    continue
-                all_ders.append((full_path, idx, der))
-
-    print('total candidate certs:', len(all_ders))
-    n_bad = 0
-    for full_path, idx, der in all_ders:
+        der = ssl.PEM_cert_to_DER_cert(m.group(0))
         try:
             ctx = ssl.create_default_context()
             ctx.load_verify_locations(cadata=der)
+            print('cadata sanity check on', f, 'SUCCEEDED')
         except Exception as e:
-            n_bad += 1
-            print('REAL PARSE FAILURE:', full_path, 'block#%d' % idx, 'size=%d' % len(der), '->', repr(e))
-    print('done, bad certs found:', n_bad)
-    EOF
-    python3 /tmp/diag_find_bad_cert.py 2>&1
-  register: diag_findbad_result
+            print('cadata sanity check on', f, 'FAILED ->', repr(e))
+        break
+    "
+  register: diag_postprereq_result
   changed_when: false
   ignore_errors: true
 
-- name: DIAGNOSTIC -- print per-cert validation output
+- name: DIAGNOSTIC -- print post-prerequisites OpenSSL/cadata check
   ansible.builtin.debug:
-    var: diag_findbad_result.stdout_lines
+    var: diag_postprereq_result.stdout_lines
 
 - name: Cache container and cloud images
   ansible.builtin.include_role:
