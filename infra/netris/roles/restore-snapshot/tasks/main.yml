@@ -514,6 +514,57 @@
   retries: 10
   delay: 10
 
+# recert.sh's boot-time "Fix pull-secret on disk" step (see
+# templates/recert.sh.j2's fix_pull_secret function) writes
+# /var/lib/kubelet/config.json directly via `cp`, bypassing
+# MachineConfigOperator's own management of that file (a workaround for
+# recert writing a file path into that field instead of embedding its
+# content). OCP 4.19's MachineConfigDaemon Config Drift Monitor compares
+# that file's on-disk content against what its currently-rendered
+# MachineConfig expects, and flags a false "unexpected on-disk
+# state...content mismatch" degraded condition purely because the byte
+# content differs from MCO's own generated version -- confirmed via a real
+# dispatch (run 29535784331): the master MachineConfigPool went
+# Degraded=true within a couple minutes of this task running, and stayed
+# stuck there for the rest of the run, blocking a later, unrelated
+# KubeletConfig rollout too. This is a known OpenShift MCO behavior (see
+# https://access.redhat.com/solutions/7036543) whose standard remedy is
+# restarting the machine-config-daemon pod, forcing it to re-validate
+# against the actual rendered MachineConfig rather than the stale drift
+# snapshot it cached at boot.
+- name: Check MachineConfigPool master degraded status
+  ansible.builtin.command:
+    cmd: >-
+      oc get mcp/master
+      -o jsonpath={.status.conditions[?(@.type=="Degraded")].status}
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _mcp_master_degraded
+  changed_when: false
+
+- name: Restart machine-config-daemon to clear boot-time pull-secret drift
+  when: _mcp_master_degraded.stdout | default('') | trim == 'True'
+  ansible.builtin.command:
+    cmd: >-
+      oc delete pod -n openshift-machine-config-operator
+      -l k8s-app=machine-config-daemon
+  environment:
+    KUBECONFIG: /root/.kube/config
+
+- name: Wait for MachineConfigPool master to recover from drift
+  when: _mcp_master_degraded.stdout | default('') | trim == 'True'
+  ansible.builtin.command:
+    cmd: >-
+      oc get mcp/master
+      -o jsonpath={.status.conditions[?(@.type=="Updated")].status}
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _mcp_master_recovered
+  until: _mcp_master_recovered.stdout | default('') | trim == 'True'
+  retries: 60
+  delay: 10
+  changed_when: false
+
 # --- Wait for cluster ready ---
 
 - name: Wait for node Ready
