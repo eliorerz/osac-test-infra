@@ -35,19 +35,12 @@ on:
       # verification (skipping JIT registration, same cost as any other
       # tooling-check failure), matching this repo's existing
       # accept-and-revisit-if-flaky precedent (see provision.sh's
-      # InsufficientInstanceCapacity handling for the same philosophy). Also
-      # prefers IPv4 over IPv6 in glibc's address selection (RFC 6724):
-      # confirmed a real, recurring (3 of 5 dispatches) failure downloading
-      # cloud images in netris-lab's cache role -- "Connection failure:
-      # [ASN1: NOT_ENOUGH_DATA]" against two unrelated hosts in the same
-      # run, failing instantly (0s elapsed) on every retry, the signature of
-      # a broken IPv6 path rather than a slow/transient timeout a retry
-      # would fix.
+      # InsufficientInstanceCapacity handling for the same philosophy).
       tooling-check-cmds:
-        description: "Semicolon-separated commands to run/verify on the box before JIT registration. Defaults to installing and verifying the CaaS/Netris flow's prerequisites (ansible-core, python3-pip, make -- matching what the equivalent Prow lab-setup step installed, and infra/netris/README.md's own documented setup), plus a gai.conf tweak working around a recurring IPv6-path SSL failure downloading cloud images."
+        description: "Semicolon-separated commands to run/verify on the box before JIT registration. Defaults to installing and verifying the CaaS/Netris flow's prerequisites (ansible-core, python3-pip, make -- matching what the equivalent Prow lab-setup step installed, and infra/netris/README.md's own documented setup)."
         required: false
         type: string
-        default: "dnf install -y ansible-core python3-pip make; pip3 install ansible; command -v ansible-playbook; command -v make; echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf"
+        default: "dnf install -y ansible-core python3-pip make; pip3 install ansible; command -v ansible-playbook; command -v make"
       osac-installer-image:
         description: "Override osac-installer image (registry-pullable reference, e.g. from a component repo's own PR build) -- accepted but not yet consumed: infra/netris has no plain extra-var for this (see the test job's 'Build component image overrides' step comment), needs podman-extraction handling in a later PR"
         required: false
@@ -312,36 +305,53 @@ jobs:
       # were all separate Prow steps too). make e2e INFRA=netris SUITE=caas
       # is the equivalent single-command form if that granularity is ever
       # not wanted.
-      # TEMPORARY: diagnosing a recurring "Connection failure: [ASN1:
-      # NOT_ENOUGH_DATA]" SSL error hitting exactly these two hosts in
-      # setup-infra's cloud-image download step, on every real dispatch so
-      # far -- while quay.io/github.com traffic in the same job succeeds. A
-      # gai.conf IPv4-preference tweak (assuming a broken IPv6 path) did NOT
-      # fix it, and one of the two failing URLs is plain http:// yet still
-      # throws an SSL error, ruling out an address-family explanation
-      # entirely. tooling-check-cmds' own SSH-based checks discard all
-      # output (verify-and-register.sh redirects to /dev/null), so this runs
-      # as a real job step instead, where full curl -v output reaches the
-      # job log. Remove once the real root cause is found and fixed.
-      - name: Diagnose cloud-image download connectivity
+      # netris-lab's vendored (not our code) cache role downloads these same
+      # two URLs itself via ansible.builtin.get_url, and that has failed
+      # every real dispatch so far with "Connection failure: [ASN1:
+      # NOT_ENOUGH_DATA]" -- an SSL/TLS parsing error, even for the plain
+      # http:// cumulus URL, which rules out an address-family (IPv4/IPv6)
+      # explanation outright (a gai.conf IPv4-preference tweak was tried
+      # first on that theory and confirmed NOT to fix it). A live diagnostic
+      # dispatch proved the network itself is fine: plain `curl` against the
+      # exact same URL, from the exact same box, in the same job run,
+      # succeeded immediately at 40+MB/s -- so the failure is specific to
+      # get_url's own Python-based request handling, not connectivity, DNS,
+      # or a proxy. Reproducing the same get_url task locally (a different
+      # network/host entirely) succeeded cleanly, so this isn't a universal
+      # ansible bug either -- it's specific to something about this box's
+      # ansible/python/openssl install (tooling-check-cmds installs BOTH
+      # dnf's ansible-core AND `pip3 install ansible` on top of it, a
+      # plausible source of a version/library mismatch). Gather concrete
+      # version info and reproduce get_url in isolation (outside the real
+      # cache role) to find the actual mechanism before changing anything.
+      - name: Diagnose get_url SSL failure (isolated repro)
         shell: bash
         continue-on-error: true
         run: |
-          echo "--- /etc/resolv.conf ---"
-          cat /etc/resolv.conf || true
-          echo "--- proxy-related env vars ---"
-          env | grep -i proxy || echo "(none set)"
-          echo "--- /etc/gai.conf ---"
-          cat /etc/gai.conf || true
-          echo "--- ip route ---"
-          ip route || true
-          for url in \
-            "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2" \
-            "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img"; do
-            echo "=== $url ==="
-            curl -v --max-time 15 -o /dev/null "$url" 2>&1 | tail -60
-            echo
-          done
+          echo "--- ansible-playbook / ansible-core / python / openssl versions ---"
+          ansible-playbook --version || true
+          rpm -q ansible-core python3 openssl-libs 2>&1 || true
+          pip3 show ansible ansible-core 2>&1 || true
+          command -v ansible-playbook
+          python3 -c "import ssl; print('OpenSSL:', ssl.OPENSSL_VERSION)"
+          echo "--- isolated get_url repro (outside the vendored cache role) ---"
+          cat > /tmp/get_url_repro.yml <<'EOF'
+          ---
+          - hosts: localhost
+            gather_facts: false
+            connection: local
+            tasks:
+              - name: Repro cumulus download
+                ansible.builtin.get_url:
+                  url: "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2"
+                  dest: "/tmp/get_url_repro_cumulus.qcow2"
+                  mode: '0644'
+                  timeout: 10
+                register: result
+                ignore_errors: true
+              - debug: var=result
+          EOF
+          ansible-playbook /tmp/get_url_repro.yml -vvv 2>&1 | tail -150
 
       - name: Setup infra prerequisites (make setup-infra)
         shell: bash
