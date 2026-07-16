@@ -28,15 +28,24 @@
 # corrupted/truncated, the whole aggregate fails to parse. This explains
 # why raw Python succeeds every time: ssl.create_default_context() with no
 # explicit cafile uses OpenSSL's own single default cafile lookup, not
-# ansible's multi-directory scan-and-concatenate. Pinpoint exactly which
-# file is corrupted by walking the same directories and PEM-parsing each
-# file individually. Remove once the real mechanism is confirmed.
+# ansible's multi-directory scan-and-concatenate.
+#
+# A first attempt at this diagnostic called ansible.module_utils.urls'
+# OWN extract_pem_certs()/get_ca_certs() helpers directly and hit
+# TypeErrors/ValueErrors -- turned out to be a version mismatch (this box
+# runs the pip-installed ansible-core 2.15.13, whose internal, private
+# helper signatures differ from other versions), not a new finding. Avoid
+# any dependency on those private, version-specific internals: scan the
+# same directories and PEM-parse each file with a self-contained regex,
+# matching only what ssl.PEM_cert_to_DER_cert() itself actually needs.
+# Remove once the real mechanism is confirmed.
 - name: DIAGNOSTIC -- pinpoint the corrupted CA cert file get_ca_certs() aggregates
   ansible.builtin.shell: |
     set -x
     cat > /tmp/diag_find_bad_cert.py <<'EOF'
-    import os, ssl
-    from ansible.module_utils.urls import get_ca_certs, extract_pem_certs
+    import os, re, ssl
+
+    PEM_RE = re.compile(r'-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----', re.DOTALL)
 
     paths = [
         '/etc/pki/ca-trust/extracted/pem',
@@ -44,6 +53,7 @@
         '/usr/share/ca-certificates/cacert.org',
         '/etc/ansible',
     ]
+    all_certs = []
     for path in paths:
         if not os.path.isdir(path):
             print('SKIP (not a dir):', path)
@@ -56,29 +66,29 @@
             try:
                 with open(full_path, 'r', errors='surrogateescape') as fh:
                     content = fh.read()
+                blocks = PEM_RE.findall(content)
                 n_ok = 0
-                for pem in extract_pem_certs(content):
+                for pem in blocks:
                     try:
-                        ssl.PEM_cert_to_DER_cert(pem)
+                        der = ssl.PEM_cert_to_DER_cert(pem)
+                        all_certs.append(der)
                         n_ok += 1
                     except Exception as e:
                         print('BAD CERT BLOCK in', full_path, 'size=%d' % size, '->', repr(e))
-                print('OK', full_path, 'size=%d' % size, 'certs=%d' % n_ok)
+                print('OK', full_path, 'size=%d' % size, 'blocks=%d' % len(blocks), 'parsed_ok=%d' % n_ok)
             except Exception as e:
                 print('READ FAILED', full_path, 'size=%d' % size, '->', repr(e))
 
-    print('=== now calling ansible.module_utils.urls.get_ca_certs() directly ===')
+    print('=== aggregate load_verify_locations() test, exactly like make_context() does ===')
     try:
-        cadata, paths_checked = get_ca_certs()
-        print('get_ca_certs() SUCCEEDED, aggregate size=%d, paths_checked=%s' % (len(cadata), paths_checked))
-        try:
-            ctx = ssl.create_default_context()
-            ctx.load_verify_locations(cadata=cadata)
-            print('load_verify_locations() on the aggregate SUCCEEDED')
-        except Exception as e:
-            print('load_verify_locations() on the aggregate FAILED ->', repr(e))
+        cadata = bytearray()
+        for der in all_certs:
+            cadata.extend(der)
+        ctx = ssl.create_default_context()
+        ctx.load_verify_locations(cadata=cadata)
+        print('load_verify_locations() on the aggregate of', len(all_certs), 'certs SUCCEEDED')
     except Exception as e:
-        print('get_ca_certs() ITSELF FAILED ->', repr(e))
+        print('load_verify_locations() on the aggregate FAILED ->', repr(e))
     EOF
     python3 /tmp/diag_find_bad_cert.py 2>&1
   register: diag_findbad_result
