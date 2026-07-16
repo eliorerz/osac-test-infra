@@ -65,6 +65,53 @@
   ansible.builtin.debug:
     var: diag_loop2_result.stdout_lines
 
+# TEMPORARY: the post-prerequisites loop above failed deterministically,
+# 6/6, with the exact same instant "Connection failure: [ASN1:
+# NOT_ENOUGH_DATA]" error -- versus 6/6 succeeding when run before any
+# prerequisite task at all. This conclusively proves something inside
+# prerequisites is the cause; rmem_default/rmem_max sysctl values are
+# already ruled out (tested and disproven), leaving prerequisites'
+# nftables backend switch, chain flush, and VM-bridge NAT/masquerade rules
+# as the only other network-relevant changes it makes. Test causation
+# directly rather than keep bisecting task-by-task: flush the ENTIRE
+# nftables ruleset (diagnosis only, not a real fix -- this would break
+# netris-lab's own VM networking) and retest, to see in one shot whether
+# nftables as a whole is really the cause before narrowing to which
+# specific rule. Remove once the real mechanism is confirmed.
+- name: DIAGNOSTIC -- flush nftables ruleset entirely and retest get_url
+  ansible.builtin.shell: |
+    set -x
+    echo "=== flushing entire nft ruleset (diagnosis only) ==="
+    nft flush ruleset
+    nft list ruleset
+    cat > /tmp/diag_loop3.yml <<'EOF'
+    ---
+    - hosts: localhost
+      gather_facts: false
+      connection: local
+      tasks:
+        - ansible.builtin.get_url:
+            url: "http://downloads.netris.ai/cumulus-linux-5.11.3-vx-amd64-qemu.qcow2"
+            dest: "/tmp/diag_loop3.qcow2"
+            mode: '0644'
+            timeout: 10
+          register: r
+          ignore_errors: true
+        - debug: var=r
+    EOF
+    for i in 1 2 3; do
+      echo "=== attempt $i at $(date -u +%H:%M:%S.%N) ==="
+      rm -f /tmp/diag_loop3.qcow2
+      ansible-playbook /tmp/diag_loop3.yml -v 2>&1 | grep -E "elapsed|msg|status_code|failed"
+    done
+  register: diag_loop3_result
+  changed_when: false
+  ignore_errors: true
+
+- name: DIAGNOSTIC -- print nftables-flushed get_url loop output
+  ansible.builtin.debug:
+    var: diag_loop3_result.stdout_lines
+
 - name: Cache container and cloud images
   ansible.builtin.include_role:
     name: cache
