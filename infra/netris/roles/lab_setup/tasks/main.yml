@@ -16,29 +16,32 @@
   ansible.builtin.include_role:
     name: prerequisites
 
-# TEMPORARY: root cause finally isolated via a real dispatch. The full
-# traceback (captured by running open_url() inside a genuine AnsibleModule
-# instance) shows the error is NOT in the network/TLS handshake at all --
-# it's in make_context() -> get_ca_certs(), which (since get_url passes no
-# cafile) scans several directories (/etc/pki/ca-trust/extracted/pem,
-# /etc/pki/tls/certs, /usr/share/ca-certificates/cacert.org, /etc/ansible)
-# for every *.pem/*.crt/*.cer file, reads and concatenates ALL of their
+# Root cause confirmed via a real dispatch. The full traceback (captured
+# by running open_url() inside a genuine AnsibleModule instance) shows the
+# error is NOT in the network/TLS handshake at all -- it's in
+# make_context() -> get_ca_certs(), which (since get_url passes no cafile)
+# scans several directories (/etc/pki/ca-trust/extracted/pem, /etc/pki/
+# tls/certs, /usr/share/ca-certificates/cacert.org, /etc/ansible) for
+# every *.pem/*.crt/*.cer file, reads and concatenates ALL of their
 # extracted PEM blocks, then calls context.load_verify_locations(cadata=
-# <the concatenation>) on the aggregate. If even ONE scanned file is
-# corrupted/truncated, the whole aggregate fails to parse. This explains
-# why raw Python succeeds every time: ssl.create_default_context() with no
-# explicit cafile uses OpenSSL's own single default cafile lookup, not
-# ansible's multi-directory scan-and-concatenate.
-#
-# A first attempt at this diagnostic called ansible.module_utils.urls'
-# OWN extract_pem_certs()/get_ca_certs() helpers directly and hit
-# TypeErrors/ValueErrors -- turned out to be a version mismatch (this box
-# runs the pip-installed ansible-core 2.15.13, whose internal, private
-# helper signatures differ from other versions), not a new finding. Avoid
-# any dependency on those private, version-specific internals: scan the
-# same directories and PEM-parse each file with a self-contained regex,
-# matching only what ssl.PEM_cert_to_DER_cert() itself actually needs.
-# Remove once the real mechanism is confirmed.
+# <the concatenation>) on the aggregate. A follow-up dispatch confirmed
+# every individual file's own certificate blocks parse fine on their own
+# (no single corrupted cert), but the AGGREGATE concatenation still fails
+# with the exact same ASN1 error -- pointing at a stale/inconsistent
+# CA-trust extraction (e.g. from EPEL/package installs earlier in
+# prerequisites triggering a partial or interrupted update-ca-trust run),
+# not a single bad file. update-ca-trust extract is the standard, safe,
+# idempotent RHEL/Fedora command to regenerate the extracted CA bundles
+# from scratch; run it here (our own code, not the vendored role) right
+# after prerequisites and before the cache role's get_url task needs a
+# working CA store.
+- name: Regenerate CA trust bundles (works around a stale/partial extraction left by prerequisites)
+  ansible.builtin.command:
+    cmd: update-ca-trust extract
+  changed_when: true
+
+# TEMPORARY: verify the fix above actually resolves the aggregate parsing
+# failure before removing this diagnostic.
 - name: DIAGNOSTIC -- pinpoint the corrupted CA cert file get_ca_certs() aggregates
   ansible.builtin.shell: |
     set -x
