@@ -534,9 +534,17 @@
 # snapshot it cached at boot.
 - name: Check MachineConfigPool master degraded status
   ansible.builtin.command:
+    # The whole jsonpath value must stay single-quoted here: ansible's
+    # command module tokenizes cmd with shlex (no shell involved), which
+    # would otherwise strip the double quotes the JSONPath filter
+    # expression needs around "Degraded" (see osac_install_full's own
+    # "Wait for MCP master" tasks for the same precedent) -- confirmed via
+    # a real dispatch (run 29539609051): without the outer single quotes,
+    # oc received a bare, unquoted `Degraded` in the filter and failed with
+    # "unrecognized identifier Degraded".
     cmd: >-
       oc get mcp/master
-      -o jsonpath={.status.conditions[?(@.type=="Degraded")].status}
+      -o 'jsonpath={.status.conditions[?(@.type=="Degraded")].status}'
   environment:
     KUBECONFIG: /root/.kube/config
   register: _mcp_master_degraded
@@ -556,7 +564,7 @@
   ansible.builtin.command:
     cmd: >-
       oc get mcp/master
-      -o jsonpath={.status.conditions[?(@.type=="Updated")].status}
+      -o 'jsonpath={.status.conditions[?(@.type=="Updated")].status}'
   environment:
     KUBECONFIG: /root/.kube/config
   register: _mcp_master_recovered
