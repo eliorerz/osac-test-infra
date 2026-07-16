@@ -70,8 +70,17 @@ mkdir -p "${LOGS_DIR}"
 # gitleaks report both contain exactly what we're trying to stop being
 # exposed, so don't leave either sitting on the (persistent, self-hosted)
 # runner's disk any longer than needed.
+#
+# REDACTED_DIR is populated as a *raw* pre-redaction copy (see the `cp -r`
+# below) and only becomes safe to keep once redact.py has actually run on
+# it -- if the script exits (e.g. redact.py itself fails under `set -e`)
+# before REDACTION_COMPLETE is set, that directory still contains real
+# secrets and must be purged too, not just left behind for the caller.
 cleanup_raw_logs() {
   rm -rf -- "${LOGS_DIR}" "${LOGS_ZIP}" "${FINDINGS_RAW_JSON}"
+  if [[ "${REDACTION_COMPLETE:-false}" != "true" ]]; then
+    rm -rf -- "${REDACTED_DIR:-}"
+  fi
 }
 trap cleanup_raw_logs EXIT
 
@@ -133,6 +142,9 @@ echo "::group::Redact and purge run ${RUN_ID}"
 REDACTED_DIR="${OUTPUT_DIR}/redacted"
 cp -r "${LOGS_DIR}" "${REDACTED_DIR}"
 python3 "$(dirname "${BASH_SOURCE[0]}")/redact.py" "${FINDINGS_RAW_JSON}" "${REDACTED_DIR}"
+# Only past this point does REDACTED_DIR actually contain redacted (not raw)
+# content -- tell cleanup_raw_logs it's now safe to keep on a normal exit.
+REDACTION_COMPLETE=true
 
 # Sanitized copy for every downstream consumer (job summaries, the audit
 # issue body) -- drop the real Secret value, keep only what reporting

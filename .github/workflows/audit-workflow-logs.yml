@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       lookback-hours:
-        description: "Re-scan completed e2e runs created in the last N hours"
+        description: "Re-scan completed e2e runs updated (completed) in the last N hours"
         required: false
         default: "25"
 
@@ -179,6 +179,14 @@ jobs:
               run_processing_failed=1
             fi
             [[ "${run_processing_failed}" -eq 1 ]] && PROCESSING_FAILURES=$((PROCESSING_FAILURES + 1))
+            # Explicit, unconditional return: without this, the function's
+            # exit status is whatever the `[[ ... ]] && ...` line above
+            # evaluated to, which is 1 (false) on the common/successful path
+            # (run_processing_failed=0). Called as a bare statement below
+            # under this step's default `set -e`, that would abort the
+            # entire loop after the very first cleanly-processed flagged run
+            # -- silently skipping every remaining run.
+            return 0
           }
 
           # Process substitution (not a trailing pipe) so the loop runs in

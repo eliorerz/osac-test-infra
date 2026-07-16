@@ -72,9 +72,16 @@ runs:
         name: redacted-logs-${{ inputs.run-id }}
         path: ${{ steps.scan.outputs.output-dir }}/redacted
         retention-days: 30
+        # A missing/empty redacted dir here means something is wrong with an
+        # already-confirmed leak -- fail loudly instead of the default warn,
+        # which is easy to miss in job logs.
+        if-no-files-found: error
 
+    # always(): a bare `if: leaks-found == 'true'` implicitly ANDs with
+    # success(), so a hard failure in the artifact-upload step above would
+    # silently skip the very notification meant to report the leak.
     - name: Warn on job summary
-      if: steps.scan.outputs.leaks-found == 'true'
+      if: always() && steps.scan.outputs.leaks-found == 'true'
       shell: bash
       env:
         RUN_ID: ${{ inputs.run-id }}
