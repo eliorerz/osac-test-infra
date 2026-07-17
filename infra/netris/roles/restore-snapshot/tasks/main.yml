@@ -583,7 +583,7 @@
     KUBECONFIG: /root/.kube/config
   register: _mcp_master_synced
   until: _mcp_master_synced.stdout | default('') | trim == 'True'
-  retries: 60
+  retries: 90
   delay: 10
   changed_when: false
   ignore_errors: true
@@ -591,6 +591,11 @@
 - name: Recover MachineConfigPool master from a stuck Degraded state
   when: _mcp_master_synced.stdout | default('') | trim != 'True'
   block:
+    # A real dispatch (run 29578502068) showed the API server can still be
+    # transiently unreachable right as this block starts -- without its
+    # own retry loop, `oc get nodes` returning an empty list makes the
+    # patch below fail outright ("resource name may not be empty") instead
+    # of retrying, turning a should-be-transient blip into a hard failure.
     - name: Clear stuck degraded annotations on the node
       ansible.builtin.shell:
         cmd: >-
@@ -599,6 +604,10 @@
           --patch '{"metadata":{"annotations":{"machineconfiguration.openshift.io/reason":"","machineconfiguration.openshift.io/state":"Done"}}}'
       environment:
         KUBECONFIG: /root/.kube/config
+      register: _clear_degraded_annotations_pull_secret
+      until: _clear_degraded_annotations_pull_secret.rc == 0
+      retries: 10
+      delay: 10
 
     - name: Restart machine-config-daemon to pick up the cleared state
       ansible.builtin.command:
