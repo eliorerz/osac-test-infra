@@ -523,52 +523,53 @@
 # that file's on-disk content against what its currently-rendered
 # MachineConfig expects, and flags a false "unexpected on-disk
 # state...content mismatch" degraded condition purely because the byte
-# content differs from MCO's own generated version -- confirmed via a real
-# dispatch (run 29535784331): the master MachineConfigPool went
-# Degraded=true within a couple minutes of this task running, and stayed
-# stuck there for the rest of the run, blocking a later, unrelated
-# KubeletConfig rollout too. This is a known OpenShift MCO behavior (see
-# https://access.redhat.com/solutions/7036543) whose standard remedy is
-# restarting the machine-config-daemon pod, forcing it to re-validate
-# against the actual rendered MachineConfig rather than the stale drift
-# snapshot it cached at boot.
-- name: Check MachineConfigPool master degraded status
+# content differs from MCO's own generated version -- confirmed via two
+# real dispatches (29535784331, 29543128386): the master MachineConfigPool
+# goes Degraded=true a short but variable time after boot (the drift
+# monitor's check isn't synchronous with recert's file write, so a
+# check-immediately-after approach races and can miss it), and stays stuck
+# there, blocking osac_install_full's own later, unrelated KubeletConfig
+# rollout too.
+#
+# Restarting machine-config-daemon (tried first) does NOT fix this: MCD's
+# "unexpected on-disk state" check is a deliberate safety guard against
+# clobbering what might be an intentional local edit, and simply restarting
+# the pod re-evaluates the same on-disk content against the same rendered
+# config and re-flags the identical drift (this is also a documented MCD
+# bug in its own right -- OCPBUGS-24003 -- where a pod restart resets the
+# drift *metric* without the underlying degraded state actually clearing).
+# The correct, documented mechanism is a one-shot force-sync file
+# (constants.MachineConfigDaemonForceFile in the MCD source) that makes it
+# skip the preflight drift check on its next sync and apply the
+# MCO-managed content itself. Create it unconditionally right after
+# recert's own boot-time write (before it can ever be observed as
+# degraded), then wait for the pool to actually finish syncing to confirm.
+- name: Force machine-config-daemon to skip its on-disk drift check
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _ssh_cmd }} "sudo touch /run/machine-config-daemon-force"
+  register: _mcd_force_sync
+  until: _mcd_force_sync.rc == 0
+  retries: 10
+  delay: 10
+
+- name: Wait for MachineConfigPool master to be fully synced
   ansible.builtin.command:
     # The whole jsonpath value must stay single-quoted here: ansible's
     # command module tokenizes cmd with shlex (no shell involved), which
     # would otherwise strip the double quotes the JSONPath filter
-    # expression needs around "Degraded" (see osac_install_full's own
+    # expression needs around "Updated" (see osac_install_full's own
     # "Wait for MCP master" tasks for the same precedent) -- confirmed via
     # a real dispatch (run 29539609051): without the outer single quotes,
-    # oc received a bare, unquoted `Degraded` in the filter and failed with
-    # "unrecognized identifier Degraded".
-    cmd: >-
-      oc get mcp/master
-      -o 'jsonpath={.status.conditions[?(@.type=="Degraded")].status}'
-  environment:
-    KUBECONFIG: /root/.kube/config
-  register: _mcp_master_degraded
-  changed_when: false
-
-- name: Restart machine-config-daemon to clear boot-time pull-secret drift
-  when: _mcp_master_degraded.stdout | default('') | trim == 'True'
-  ansible.builtin.command:
-    cmd: >-
-      oc delete pod -n openshift-machine-config-operator
-      -l k8s-app=machine-config-daemon
-  environment:
-    KUBECONFIG: /root/.kube/config
-
-- name: Wait for MachineConfigPool master to recover from drift
-  when: _mcp_master_degraded.stdout | default('') | trim == 'True'
-  ansible.builtin.command:
+    # oc received a bare, unquoted identifier in the filter and failed with
+    # "unrecognized identifier".
     cmd: >-
       oc get mcp/master
       -o 'jsonpath={.status.conditions[?(@.type=="Updated")].status}'
   environment:
     KUBECONFIG: /root/.kube/config
-  register: _mcp_master_recovered
-  until: _mcp_master_recovered.stdout | default('') | trim == 'True'
+  register: _mcp_master_synced
+  until: _mcp_master_synced.stdout | default('') | trim == 'True'
   retries: 60
   delay: 10
   changed_when: false
