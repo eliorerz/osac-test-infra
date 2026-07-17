@@ -50,7 +50,7 @@ oc wait --for=create pods \
 echo "Waiting for metal3 pods to be ready..."
 oc wait --for=condition=Ready pods \
   -l baremetal.openshift.io/cluster-baremetal-operator=metal3-state \
-  -n openshift-machine-api --timeout=180s
+  -n openshift-machine-api --timeout=600s
 echo "Ironic is active."
 
 # --- Step 2: Discover network and gateway IP ---
