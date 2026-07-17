@@ -97,6 +97,65 @@
         content: "{{ _values_raw.content | b64decode | from_yaml | combine(_image_overrides, recursive=true) | to_nice_yaml(indent=2) }}"
         mode: "0644"
 
+# MCO can independently flag the master MachineConfigPool Degraded at any
+# point during this flow, not just right after restore-snapshot's own
+# pull-secret fix or this role's own later KubeletConfig apply (both of
+# which have their own recovery already) -- confirmed via a real
+# interactive session: MCO spontaneously rendered a new MachineConfig and
+# hit the transient "desiredConfig annotation not found on node" race
+# entirely on its own, well before this role even reached its KubeletConfig
+# step, and stayed Degraded long enough to break operator catalog image
+# pulls (kubelet reads /var/lib/kubelet/config.json for those, which MCD
+# won't write correctly while stuck Degraded). This race is often transient
+# and clears with a bit more time, but not reliably -- so check for it here
+# too, right before the first thing that depends on catalog image pulls
+# working, rather than assume it can't recur just because it's not
+# immediately after a change we made ourselves.
+- name: Check MachineConfigPool master is not stuck Degraded before operator image pulls
+  ansible.builtin.command:
+    cmd: >-
+      oc get mcp/master
+      -o 'jsonpath={.status.conditions[?(@.type=="Degraded")].status}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _mcp_pre_catalog_degraded
+  until: _mcp_pre_catalog_degraded.stdout | default('') | trim == 'False'
+  retries: 30
+  delay: 10
+  changed_when: false
+  ignore_errors: true
+
+- name: Recover MCP master from a stuck Degraded state before operator image pulls
+  when: _mcp_pre_catalog_degraded.stdout | default('') | trim != 'False'
+  block:
+    - name: Clear stuck degraded annotations on the node
+      ansible.builtin.shell:
+        cmd: >-
+          oc patch node "$(oc get nodes -o jsonpath='{.items[0].metadata.name}')"
+          --type merge
+          --patch '{"metadata":{"annotations":{"machineconfiguration.openshift.io/reason":"","machineconfiguration.openshift.io/state":"Done"}}}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+
+    - name: Restart machine-config-daemon to pick up the cleared state
+      ansible.builtin.command:
+        cmd: oc delete pod -n openshift-machine-config-operator -l k8s-app=machine-config-daemon
+      environment:
+        KUBECONFIG: /root/.kube/config
+
+    - name: Wait for MachineConfigPool master to recover (after recovery)
+      ansible.builtin.command:
+        cmd: >-
+          oc get mcp/master
+          -o 'jsonpath={.status.conditions[?(@.type=="Degraded")].status}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _mcp_pre_catalog_degraded_recovered
+      until: _mcp_pre_catalog_degraded_recovered.stdout | default('') | trim == 'False'
+      retries: 30
+      delay: 10
+      changed_when: false
+
 # The sno-4-19-ps flavor is bare OpenShift restored via restore-snapshot's
 # recert mechanism, not installed via roles/ocp_install's Assisted-Installer
 # manifest injection -- so it never gets the maxPods bump that path applies
@@ -183,6 +242,18 @@
   delay: 10
   changed_when: false
 
+# This KubeletConfig rollout is a genuinely new MachineConfig render (not
+# just re-syncing to an already-applied one), so it can independently hit
+# the same stuck-Degraded MCD state documented in roles/restore-snapshot's
+# own comment (recert's boot-time bug leaves the node's tracked state
+# vulnerable to being latched Degraded by an unrelated, earlier
+# reconciliation). An earlier version of this fix defensively re-applied
+# recert's pull-secret file over /var/lib/kubelet/config.json here "just in
+# case" -- that was wrong and actively harmful: it overwrote MCD's own
+# correct, freshly-rendered content with something that then mismatched
+# THIS render, guaranteeing a fresh drift flag. Removed; if the wait below
+# times out, recover the same way roles/restore-snapshot does (confirmed
+# via a real interactive session against this exact failure point).
 - name: Wait for MCP master to finish updating (node reboots on SNO, API is briefly unreachable)
   ansible.builtin.command:
     cmd: >-
@@ -195,6 +266,38 @@
   retries: 90
   delay: 10
   changed_when: false
+  ignore_errors: true
+
+- name: Recover MCP master from a stuck Degraded state
+  when: _mcp_updated.stdout | default('') | trim != 'True'
+  block:
+    - name: Clear stuck degraded annotations on the node
+      ansible.builtin.shell:
+        cmd: >-
+          oc patch node "$(oc get nodes -o jsonpath='{.items[0].metadata.name}')"
+          --type merge
+          --patch '{"metadata":{"annotations":{"machineconfiguration.openshift.io/reason":"","machineconfiguration.openshift.io/state":"Done"}}}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+
+    - name: Restart machine-config-daemon to pick up the cleared state
+      ansible.builtin.command:
+        cmd: oc delete pod -n openshift-machine-config-operator -l k8s-app=machine-config-daemon
+      environment:
+        KUBECONFIG: /root/.kube/config
+
+    - name: Wait for MCP master to finish updating (after recovery)
+      ansible.builtin.command:
+        cmd: >-
+          oc get mcp/master
+          -o 'jsonpath={.status.conditions[?(@.type=="Updated")].status}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _mcp_updated_recovered
+      until: _mcp_updated_recovered.stdout | default('') | trim == 'True'
+      retries: 90
+      delay: 10
+      changed_when: false
 
 - name: Wait for node Ready after MCP update
   ansible.builtin.shell:
@@ -206,32 +309,6 @@
   retries: 30
   delay: 10
   changed_when: false
-
-# roles/restore-snapshot's own MCP-sync fix (see its own comment for the
-# full root-cause writeup) restores /var/lib/kubelet/config.json after
-# forcing machine-config-daemon past a stale drift check inherited from the
-# golden snapshot's own recert bug -- but this KubeletConfig rollout is a
-# SECOND, separate MCD reconciliation pass, and it's not confirmed whether
-# it also reverts that file back to its garbage pre-fix state. Defensively
-# re-apply the same known-good content here too, since a corrupted
-# config.json breaks kubelet's own direct image pulls (confirmed earlier:
-# operator catalog pods failing with "invalid character '/' looking for
-# beginning of value" -- the unresolved /tmp/crypto/pull-secret path
-# recert writes instead of content) -- which would otherwise silently
-# break the operator installs this role is about to run.
-- name: Restore correct pull-secret content on kubelet config.json after KubeletConfig rollout
-  ansible.builtin.shell:
-    cmd: >-
-      oc debug node/$(oc get nodes -o jsonpath='{.items[0].metadata.name}')
-      -- chroot /host
-      cp /var/lib/snapshot-recert/crypto/pull-secret /var/lib/kubelet/config.json
-  environment:
-    KUBECONFIG: /root/.kube/config
-  register: _restore_config_json_after_kubeletconfig
-  until: _restore_config_json_after_kubeletconfig.rc == 0
-  retries: 5
-  delay: 10
-  changed_when: true
 
 - name: Install infra operators (Phase 1)
   ansible.builtin.command:

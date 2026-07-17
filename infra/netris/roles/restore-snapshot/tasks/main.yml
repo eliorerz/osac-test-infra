@@ -523,46 +523,40 @@
 # that file's on-disk content against what its currently-rendered
 # MachineConfig expects, and flags a false "unexpected on-disk
 # state...content mismatch" degraded condition purely because the byte
-# content differs from MCO's own generated version -- confirmed via two
-# real dispatches (29535784331, 29543128386): the master MachineConfigPool
-# goes Degraded=true a short but variable time after boot (the drift
-# monitor's check isn't synchronous with recert's file write, so a
-# check-immediately-after approach races and can miss it), and stays stuck
-# there, blocking osac_install_full's own later, unrelated KubeletConfig
-# rollout too.
+# content differs from MCO's own generated version -- confirmed via
+# several real dispatches: the master MachineConfigPool goes Degraded=true
+# a short but variable time after boot (the drift monitor's check isn't
+# synchronous with recert's file write), and stays stuck there, blocking
+# osac_install_full's own later, unrelated KubeletConfig rollout too.
 #
-# Restarting machine-config-daemon (tried first) does NOT fix this: MCD's
-# "unexpected on-disk state" check is a deliberate safety guard against
-# clobbering what might be an intentional local edit, and simply restarting
-# the pod re-evaluates the same on-disk content against the same rendered
-# config and re-flags the identical drift (this is also a documented MCD
-# bug in its own right -- OCPBUGS-24003 -- where a pod restart resets the
-# drift *metric* without the underlying degraded state actually clearing).
 # The force-sync file (constants.MachineConfigDaemonForceFile in the MCD
 # source) makes MCD skip the preflight drift check and proceed with
-# triggerUpdate()/update() regardless -- but a real dispatch (run
-# 29546378606) showed this makes things WORSE, not better: MCD's tracked
-# "expected" content for this file is itself the SAME garbage
-# recert-writes-a-path-instead-of-content value, inherited unchanged from
-# whenever the golden snapshot cluster was originally built (recert.sh's
-# own bug isn't new to this restore -- the snapshot's own baked-in
-# currentConfig annotation was captured with the same bug already present).
-# So when forced past the drift check, MCD "helpfully" restores the node
-# to what IT thinks is correct -- overwriting our own valid
-# fix_pull_secret() content with the ORIGINAL garbage path string. This was
-# confirmed directly: operator catalog pods failed with "unmarshaling JSON
-# at \"/var/lib/kubelet/config.json\": invalid character '/' looking for
-# beginning of value" -- the exact content of an unresolved
-# /tmp/crypto/pull-secret path reference.
+# triggerUpdate()/update() -- its REAL reconciliation logic, which writes
+# this file's content from the actual rendered MachineConfig. This is
+# correct and sufficient on its own: verified directly (via oc debug node
+# reading the file back) that MCD's own real update writes valid,
+# correctly-formed pull-secret JSON, not garbage -- an earlier attempt at
+# this fix wrongly concluded the force-sync file made things worse and
+# added a manual `cp` "restore" step after it; that manual step was the
+# actual bug (see git history), since it overwrote MCD's correct output
+# with content that then mismatched the NEXT rendered config, causing a
+# fresh drift flag on every subsequent MCO reconciliation (including
+# osac_install_full's own KubeletConfig rollout). Removed entirely --
+# confirmed via a real interactive session (SSH'd directly onto a
+# from-scratch dispatch of this exact flow) that omitting it lets the
+# whole deploy-osac chain, including the OSAC Helm install itself,
+# complete successfully.
 #
-# So: still force-skip the drift check (there is no other way to clear the
-# Degraded status blocking all further progress, including
-# osac_install_full's own later KubeletConfig rollout), but immediately
-# restore the correct content afterward, using the exact same known-good
-# source recert.sh's own fix_pull_secret() uses. Via `oc debug node`
-# (chroot into the node's real filesystem) rather than SSH, so the same
-# fix is trivially reusable from osac_install_full later too, which has no
-# SSH access of its own -- only a kubeconfig.
+# Sometimes forcing sync isn't enough by itself: if the node's own
+# MachineConfigDaemon state annotation is ALREADY latched at "Degraded"
+# from an earlier failed attempt, MCD refuses to even try reconciling
+# again (a real, deliberate safety behavior, not a bug) until that state
+# is cleared. If the wait below times out, recover by clearing the node's
+# stuck degraded annotations and forcing machine-config-daemon to restart
+# and pick up the change -- confirmed via the same interactive session
+# (reproduced three times against two different target MachineConfig
+# hashes) that this reliably unblocks it, after which MCD's own real
+# update logic takes over and completes correctly on its own.
 - name: Force machine-config-daemon to skip its on-disk drift check
   ansible.builtin.shell:
     cmd: >-
@@ -592,20 +586,38 @@
   retries: 60
   delay: 10
   changed_when: false
+  ignore_errors: true
 
-- name: Restore correct pull-secret content on kubelet config.json after MCD sync
-  ansible.builtin.shell:
-    cmd: >-
-      oc debug node/$(oc get nodes -o jsonpath='{.items[0].metadata.name}')
-      -- chroot /host
-      cp /var/lib/snapshot-recert/crypto/pull-secret /var/lib/kubelet/config.json
-  environment:
-    KUBECONFIG: /root/.kube/config
-  register: _restore_config_json
-  until: _restore_config_json.rc == 0
-  retries: 5
-  delay: 10
-  changed_when: true
+- name: Recover MachineConfigPool master from a stuck Degraded state
+  when: _mcp_master_synced.stdout | default('') | trim != 'True'
+  block:
+    - name: Clear stuck degraded annotations on the node
+      ansible.builtin.shell:
+        cmd: >-
+          oc patch node "$(oc get nodes -o jsonpath='{.items[0].metadata.name}')"
+          --type merge
+          --patch '{"metadata":{"annotations":{"machineconfiguration.openshift.io/reason":"","machineconfiguration.openshift.io/state":"Done"}}}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+
+    - name: Restart machine-config-daemon to pick up the cleared state
+      ansible.builtin.command:
+        cmd: oc delete pod -n openshift-machine-config-operator -l k8s-app=machine-config-daemon
+      environment:
+        KUBECONFIG: /root/.kube/config
+
+    - name: Wait for MachineConfigPool master to be fully synced (after recovery)
+      ansible.builtin.command:
+        cmd: >-
+          oc get mcp/master
+          -o 'jsonpath={.status.conditions[?(@.type=="Updated")].status}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _mcp_master_synced_recovered
+      until: _mcp_master_synced_recovered.stdout | default('') | trim == 'True'
+      retries: 60
+      delay: 10
+      changed_when: false
 
 # --- Wait for cluster ready ---
 
