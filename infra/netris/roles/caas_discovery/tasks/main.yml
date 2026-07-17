@@ -137,6 +137,15 @@
   retries: 10
   delay: 15
 
+# A real dispatch (run 29589547532) timed out here after 10 minutes with no
+# prior evidence of why -- the InfraEnv/assisted-image-service mechanism
+# itself is normally fast (confirmed live: a fresh InfraEnv on a working
+# cluster gets its ISO URL in 20-30s, even immediately after post-osac
+# restarts assisted-service/assisted-image-service), so this wasn't a
+# known, already-diagnosed timing race. Capture real diagnostic evidence on
+# failure -- InfraEnv status and assisted-service's own logs -- so a
+# recurrence can be root-caused from actual evidence instead of guessing
+# (the exact mistake commit fffe09a made in the MCD/pull-secret area).
 - name: Wait for discovery ISO URL
   ansible.builtin.shell:
     cmd: oc get infraenv {{ caas_discovery_infraenv_name }} -n {{ caas_discovery_infraenv_namespace }} -o jsonpath='{.status.isoDownloadURL}'
@@ -145,6 +154,37 @@
   retries: 60
   delay: 10
   changed_when: false
+  ignore_errors: true
+
+- name: Fetch InfraEnv/assisted-service diagnostics on failure
+  when: _iso_url.stdout | default('') | length == 0
+  block:
+    - name: Dump InfraEnv status
+      ansible.builtin.command:
+        cmd: oc get infraenv {{ caas_discovery_infraenv_name }} -n {{ caas_discovery_infraenv_namespace }} -o yaml
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _infraenv_status
+      changed_when: false
+      failed_when: false
+
+    - name: Dump assisted-service logs
+      ansible.builtin.command:
+        cmd: oc logs deploy/assisted-service -n multicluster-engine -c assisted-service --tail=200
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _assisted_service_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with diagnostics
+      ansible.builtin.fail:
+        msg: |
+          Timed out waiting for discovery ISO URL. InfraEnv status:
+          {{ _infraenv_status.stdout | default('could not fetch InfraEnv status') }}
+
+          assisted-service logs (last 200 lines):
+          {{ _assisted_service_logs.stdout | default('no logs available') }}
 
 - name: Download discovery ISO
   ansible.builtin.get_url:
