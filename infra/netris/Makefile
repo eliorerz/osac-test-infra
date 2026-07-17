@@ -55,7 +55,19 @@ post-osac:
 # (golden-snapshot + refresh-after-snapshot.py adoption dance), this never
 # has pre-existing Helm-unmanaged resources to adopt -- everything is
 # created fresh, with correct Helm ownership metadata from the start.
-deploy-osac-full: install-osac-full
+#
+# post-osac is still required here even though there's no snapshot/recert
+# staleness to clean up: MCE's assisted-service ConfigMap ships with OS_IMAGES
+# entries for every OCP version/architecture combination by default (47
+# entries, confirmed live), regardless of install method. Without post-osac's
+# filtering, assisted-image-service tries to download every one of those
+# RHCOS ISOs into its 50Gi PVC and crashes with "no space left on device"
+# partway through -- confirmed directly on a live debug cluster. post-osac's
+# operator scale-down is also required, not just its filtering: patching the
+# ConfigMap/StatefulSet alone gets silently reverted by
+# infrastructure-operator/multicluster-engine-operator's own reconciliation
+# within about a minute (also confirmed live) if they're left running.
+deploy-osac-full: install-osac-full post-osac
 
 install-osac-full:
 	ansible-playbook playbooks/install-osac-full.yml $(ANSIBLE_EXTRA)
