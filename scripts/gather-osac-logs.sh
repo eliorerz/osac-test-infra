@@ -259,8 +259,8 @@ MAX_SUMMARY_LINES=1000
 while IFS= read -r -d '' f; do
     [[ ${total_lines} -ge ${MAX_SUMMARY_LINES} ]] && break
     matches=$(grep -inE --color=never -B1 -A3 \
-        '\b(error|panic|fatal|failed|unreachable)\b' "$f" 2>/dev/null \
-        | grep -ivE '\b(failed|unreachable)=0\b') || continue
+        '\b(errors?|panick?|fatal|fail(ed|ure)?|unreachable)\b' "$f" 2>/dev/null \
+        | grep -ivE '\b(fail(ed|ure)?|unreachable)=0\b') || continue
     # Skip files where filtering removed all actual matches, leaving only context lines
     printf '%s\n' "$matches" | grep -qE '^[0-9]+:' || continue
     echo ""
