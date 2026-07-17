@@ -217,6 +217,8 @@ spec:
   bootMACAddress: "${MAC}"
   bootMode: UEFI
   automatedCleaningMode: metadata
+  rootDeviceHints:
+    deviceName: /dev/vda
   bmc:
     address: "redfish-virtualmedia+http://${GW_IP}:${SUSHY_PORT}/redfish/v1/Systems/${VM_UUID}"
     credentialsName: ${VM_NAME}-bmc-secret
