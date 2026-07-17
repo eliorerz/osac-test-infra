@@ -207,6 +207,32 @@
   delay: 10
   changed_when: false
 
+# roles/restore-snapshot's own MCP-sync fix (see its own comment for the
+# full root-cause writeup) restores /var/lib/kubelet/config.json after
+# forcing machine-config-daemon past a stale drift check inherited from the
+# golden snapshot's own recert bug -- but this KubeletConfig rollout is a
+# SECOND, separate MCD reconciliation pass, and it's not confirmed whether
+# it also reverts that file back to its garbage pre-fix state. Defensively
+# re-apply the same known-good content here too, since a corrupted
+# config.json breaks kubelet's own direct image pulls (confirmed earlier:
+# operator catalog pods failing with "invalid character '/' looking for
+# beginning of value" -- the unresolved /tmp/crypto/pull-secret path
+# recert writes instead of content) -- which would otherwise silently
+# break the operator installs this role is about to run.
+- name: Restore correct pull-secret content on kubelet config.json after KubeletConfig rollout
+  ansible.builtin.shell:
+    cmd: >-
+      oc debug node/$(oc get nodes -o jsonpath='{.items[0].metadata.name}')
+      -- chroot /host
+      cp /var/lib/snapshot-recert/crypto/pull-secret /var/lib/kubelet/config.json
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _restore_config_json_after_kubeletconfig
+  until: _restore_config_json_after_kubeletconfig.rc == 0
+  retries: 5
+  delay: 10
+  changed_when: true
+
 - name: Install infra operators (Phase 1)
   ansible.builtin.command:
     cmd: "make install-operators VALUES_FILE={{ snapshot_osac_values_file }}"

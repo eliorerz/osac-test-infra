@@ -538,12 +538,31 @@
 # config and re-flags the identical drift (this is also a documented MCD
 # bug in its own right -- OCPBUGS-24003 -- where a pod restart resets the
 # drift *metric* without the underlying degraded state actually clearing).
-# The correct, documented mechanism is a one-shot force-sync file
-# (constants.MachineConfigDaemonForceFile in the MCD source) that makes it
-# skip the preflight drift check on its next sync and apply the
-# MCO-managed content itself. Create it unconditionally right after
-# recert's own boot-time write (before it can ever be observed as
-# degraded), then wait for the pool to actually finish syncing to confirm.
+# The force-sync file (constants.MachineConfigDaemonForceFile in the MCD
+# source) makes MCD skip the preflight drift check and proceed with
+# triggerUpdate()/update() regardless -- but a real dispatch (run
+# 29546378606) showed this makes things WORSE, not better: MCD's tracked
+# "expected" content for this file is itself the SAME garbage
+# recert-writes-a-path-instead-of-content value, inherited unchanged from
+# whenever the golden snapshot cluster was originally built (recert.sh's
+# own bug isn't new to this restore -- the snapshot's own baked-in
+# currentConfig annotation was captured with the same bug already present).
+# So when forced past the drift check, MCD "helpfully" restores the node
+# to what IT thinks is correct -- overwriting our own valid
+# fix_pull_secret() content with the ORIGINAL garbage path string. This was
+# confirmed directly: operator catalog pods failed with "unmarshaling JSON
+# at \"/var/lib/kubelet/config.json\": invalid character '/' looking for
+# beginning of value" -- the exact content of an unresolved
+# /tmp/crypto/pull-secret path reference.
+#
+# So: still force-skip the drift check (there is no other way to clear the
+# Degraded status blocking all further progress, including
+# osac_install_full's own later KubeletConfig rollout), but immediately
+# restore the correct content afterward, using the exact same known-good
+# source recert.sh's own fix_pull_secret() uses. Via `oc debug node`
+# (chroot into the node's real filesystem) rather than SSH, so the same
+# fix is trivially reusable from osac_install_full later too, which has no
+# SSH access of its own -- only a kubeconfig.
 - name: Force machine-config-daemon to skip its on-disk drift check
   ansible.builtin.shell:
     cmd: >-
@@ -573,6 +592,20 @@
   retries: 60
   delay: 10
   changed_when: false
+
+- name: Restore correct pull-secret content on kubelet config.json after MCD sync
+  ansible.builtin.shell:
+    cmd: >-
+      oc debug node/$(oc get nodes -o jsonpath='{.items[0].metadata.name}')
+      -- chroot /host
+      cp /var/lib/snapshot-recert/crypto/pull-secret /var/lib/kubelet/config.json
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _restore_config_json
+  until: _restore_config_json.rc == 0
+  retries: 5
+  delay: 10
+  changed_when: true
 
 # --- Wait for cluster ready ---
 
