@@ -112,6 +112,18 @@
         {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
   when: osac_aap_image | default('') | length > 0
 
+- name: Override AAP project git URI in values file
+  ansible.builtin.shell:
+    cmd: |
+      sed -i 's|projectGitUri: .*|projectGitUri: "{{ osac_aap_repo }}"|' \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+  # Unconditional (unlike the branch override below): osac_aap_repo always
+  # has a value (defaults to upstream, matching values.yaml.example
+  # projectGitUri), so re-applying it is a harmless no-op when not
+  # overridden -- same pattern osac_installer_repo/osac_operator_repo/
+  # fulfillment_service_repo already use for their own (unconditional)
+  # git-clone tasks.
+
 - name: Override AAP project git branch in values file
   ansible.builtin.shell:
     cmd: |

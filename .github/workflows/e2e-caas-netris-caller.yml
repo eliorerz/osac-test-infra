@@ -46,6 +46,14 @@ on:
         description: "Override osac-aap execution-environment image (registry-pullable reference) -- empty means no override"
         required: false
         default: ""
+      osac-aap-repo:
+        description: "Override osac-aap git URI the AAP Project syncs ansible content from (e.g. a personal fork, to test a PR pre-merge) -- empty means the upstream repo already baked into the snapshot's values file. Not sensitive: a public repo URL."
+        required: false
+        default: ""
+      osac-aap-branch:
+        description: "Branch, tag, or commit of osac-aap for the AAP Project to sync ansible content from -- empty means whatever's already baked into the snapshot's values file."
+        required: false
+        default: ""
 
 jobs:
   e2e-caas-netris:
@@ -58,3 +66,5 @@ jobs:
       osac-operator-image: ${{ inputs.osac-operator-image || '' }}
       fulfillment-service-image: ${{ inputs.fulfillment-service-image || '' }}
       osac-aap-ee-image: ${{ inputs.osac-aap-ee-image || '' }}
+      osac-aap-repo: ${{ inputs.osac-aap-repo || '' }}
+      osac-aap-branch: ${{ inputs.osac-aap-branch || '' }}

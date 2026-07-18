@@ -66,6 +66,16 @@ on:
         required: false
         type: string
         default: ""
+      osac-aap-repo:
+        description: "Override osac-aap git URI the AAP Project syncs ansible content from (e.g. a personal fork, to test a PR pre-merge) -- empty means the upstream repo already baked into the snapshot's values file. Consumed by infra/netris/roles/osac_refresh."
+        required: false
+        type: string
+        default: ""
+      osac-aap-branch:
+        description: "Branch, tag, or commit of osac-aap for the AAP Project to sync ansible content from -- empty means whatever's already baked into the snapshot's values file. Consumed by infra/netris/roles/osac_refresh."
+        required: false
+        type: string
+        default: ""
     outputs:
       result:
         description: "Overall result: PASSED or FAILED"
@@ -219,11 +229,13 @@ jobs:
           FULFILLMENT_SERVICE_IMAGE: ${{ inputs.fulfillment-service-image }}
           FULFILLMENT_SERVICE_BRANCH: ${{ inputs.fulfillment-service-branch }}
           OSAC_AAP_EE_IMAGE: ${{ inputs.osac-aap-ee-image }}
+          OSAC_AAP_REPO: ${{ inputs.osac-aap-repo }}
+          OSAC_AAP_BRANCH: ${{ inputs.osac-aap-branch }}
         run: |
-          for name in OSAC_INSTALLER_IMAGE OSAC_OPERATOR_IMAGE FULFILLMENT_SERVICE_IMAGE FULFILLMENT_SERVICE_BRANCH OSAC_AAP_EE_IMAGE; do
+          for name in OSAC_INSTALLER_IMAGE OSAC_OPERATOR_IMAGE FULFILLMENT_SERVICE_IMAGE FULFILLMENT_SERVICE_BRANCH OSAC_AAP_EE_IMAGE OSAC_AAP_REPO OSAC_AAP_BRANCH; do
             value="${!name}"
             if [[ -n "$value" ]] && [[ ! "$value" =~ ^[A-Za-z0-9._/:@-]+$ ]]; then
-              echo "::error::${name} contains characters outside a valid image reference (letters, digits, and ._/:@- only): ${value}"
+              echo "::error::${name} contains characters outside a valid reference (letters, digits, and ._/:@- only): ${value}"
               exit 1
             fi
           done
@@ -258,6 +270,8 @@ jobs:
           FULFILLMENT_SERVICE_IMAGE: ${{ inputs.fulfillment-service-image }}
           FULFILLMENT_SERVICE_BRANCH: ${{ inputs.fulfillment-service-branch }}
           OSAC_AAP_EE_IMAGE: ${{ inputs.osac-aap-ee-image }}
+          OSAC_AAP_REPO: ${{ inputs.osac-aap-repo }}
+          OSAC_AAP_BRANCH: ${{ inputs.osac-aap-branch }}
         run: |
           if ! command -v jq >/dev/null 2>&1; then
             sudo dnf install -y jq
@@ -268,6 +282,8 @@ jobs:
             [fulfillment_service_image]="$FULFILLMENT_SERVICE_IMAGE"
             [fulfillment_service_branch]="$FULFILLMENT_SERVICE_BRANCH"
             [osac_aap_image]="$OSAC_AAP_EE_IMAGE"
+            [osac_aap_repo]="$OSAC_AAP_REPO"
+            [osac_aap_branch]="$OSAC_AAP_BRANCH"
           )
           for key in "${!OVERRIDES[@]}"; do
             value="${OVERRIDES[$key]}"
