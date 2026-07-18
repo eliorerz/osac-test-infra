@@ -367,6 +367,16 @@ jobs:
           sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/pull-secret.json"
           chmod 600 "$RUNNER_TEMP/pull-secret.json"
 
+          # tests/caas/conftest.py's ssh_public_key_path fixture defaults to
+          # ~/.ssh/id_rsa.pub (root's, since the container runs as root) --
+          # confirmed live via a real dispatch that test_cluster_create fails
+          # outright with FileNotFoundError without this, since nothing else
+          # in this step staged/mounted it. Not sensitive like the other two
+          # (it's a public key), so no chmod/ownership tightening needed
+          # beyond matching them for consistency.
+          sudo cp /root/.ssh/id_rsa.pub "$RUNNER_TEMP/id_rsa.pub"
+          sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/id_rsa.pub"
+
           # steps.output, not $GITHUB_ENV: the latter would leak
           # OSAC_NAMESPACE into every later step in this job (gather-infra,
           # gather-caas, upload-artifact), none of which need it -- scope it
@@ -414,6 +424,7 @@ jobs:
           podman run --rm --network=host \
             -v "$RUNNER_TEMP/kubeconfig":/root/.kube/config:ro,Z \
             -v "$RUNNER_TEMP/pull-secret.json":/root/pull-secret:ro,Z \
+            -v "$RUNNER_TEMP/id_rsa.pub":/root/.ssh/id_rsa.pub:ro,Z \
             -v "$RUNNER_TEMP/test-output":/tmp/test-output:Z \
             -e KUBECONFIG=/root/.kube/config \
             -e OSAC_VM_KUBECONFIG=/root/.kube/config \
@@ -430,7 +441,7 @@ jobs:
       - name: Remove staged secret copies
         if: always()
         shell: bash
-        run: rm -f "$RUNNER_TEMP/kubeconfig" "$RUNNER_TEMP/pull-secret.json"
+        run: rm -f "$RUNNER_TEMP/kubeconfig" "$RUNNER_TEMP/pull-secret.json" "$RUNNER_TEMP/id_rsa.pub"
 
       # Two separate steps, each independently best-effort (rather than one
       # script with both commands): GH Actions' default bash shell runs with
