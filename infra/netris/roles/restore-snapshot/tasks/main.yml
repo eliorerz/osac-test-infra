@@ -688,11 +688,22 @@
           environment:
             KUBECONFIG: /root/.kube/config
 
+        # A real dispatch showed this get stuck at "1 old replicas are
+        # pending termination" for the entire 300s window with zero further
+        # progress (confirmed: the identical step completed in ~3 minutes on
+        # a different run of the same commit, so this is a timing-sensitive
+        # flake, not a fundamentally broken restart). Retrying re-issues a
+        # fresh `oc rollout status` watch each attempt rather than just
+        # waiting longer on a single (possibly stale) watch connection.
         - name: Wait for cluster-proxy-addon-manager rollout
           ansible.builtin.command:
             cmd: oc rollout status deployment/cluster-proxy-addon-manager -n multicluster-engine --timeout=300s
           environment:
             KUBECONFIG: /root/.kube/config
+          register: _cpam_rollout
+          until: _cpam_rollout.rc == 0
+          retries: 2
+          delay: 5
 
         - name: Wait for MultiClusterEngine to be Available
           ansible.builtin.command:
