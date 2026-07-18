@@ -78,8 +78,13 @@ aws_access_key_id: "{{ lookup('ini', 'aws_access_key_id section=default file=' +
 aws_secret_access_key: "{{ lookup('ini', 'aws_secret_access_key section=default file=' + config_path, errors='ignore') | default(lookup('env', 'AWS_SECRET_ACCESS_KEY'), true) }}"
 aws_region: "{{ lookup('ini', 'aws_region section=default file=' + config_path, errors='ignore') | default(lookup('env', 'AWS_DEFAULT_REGION'), true) | default('us-east-1', true) }}"
 
-# CaaS OCP Version
-caas_ocp_version: "4.19"
+# CaaS OCP Version -- must match a version actually present in the golden
+# caas snapshot's baked-in AgentServiceConfig OS_IMAGES (confirmed live: that
+# snapshot's OS_IMAGES is filtered to a single 4.22 x86_64 entry, matching
+# the snapshot's own hub OCP version -- InfraEnv creation fails outright
+# ("Specified OSImageVersion is missing from AgentServiceConfig") if this
+# doesn't match). Was stale at 4.19 from an earlier build of this flavor.
+caas_ocp_version: "4.22"
 caas_release_image: "quay.io/openshift-release-dev/ocp-release:{{ caas_ocp_version }}.0-multi"
 
 # CaaS Discovery (boot remaining servers with discovery ISO)
