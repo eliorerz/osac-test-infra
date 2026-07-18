@@ -18,7 +18,7 @@ import sqlite3
 import statistics
 import threading
 from datetime import datetime, timezone, timedelta
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 import requests
@@ -2282,7 +2282,11 @@ def main():
 
     logger.info("Starting workflow exporter on port %d (poll every %ds)", PORT, POLL_INTERVAL)
 
-    server = HTTPServer(("0.0.0.0", PORT), ExporterHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), ExporterHandler)
+    # Otherwise a client request still in flight when the process is asked
+    # to exit would keep it alive -- this is a long-running daemon, not a
+    # service with a graceful-drain shutdown path.
+    server.daemon_threads = True
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
