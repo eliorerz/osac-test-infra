@@ -650,7 +650,7 @@
     - name: Check for cluster-proxy-addon-manager crash loop
       ansible.builtin.shell:
         cmd: |
-          oc get pods -n multicluster-engine -l app=cluster-proxy-addon-manager -o json | python3 -c "
+          oc get pods -n multicluster-engine -l component=cluster-proxy-addon-manager -o json | python3 -c "
           import json, sys
           pods = json.load(sys.stdin)['items']
           for pod in pods:
