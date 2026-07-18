@@ -1,7 +1,34 @@
 ---
+# module_defaults below works around a confirmed real-dispatch root cause:
+# netris-lab's vendored prerequisites role drags in a real openssl-libs
+# upgrade (3.2.2 -> 3.5.5) as a side effect of its package installs, and
+# that OpenSSL version breaks Python's ssl.SSLContext.load_verify_locations
+# (cadata=...) bytes-based multi-certificate loading path -- the exact
+# path ansible.builtin.get_url always uses for CA validation, breaking the
+# vendored cache role's cloud-image downloads. Pinning openssl-libs was
+# tried and rejected (breaks installing libvirt/qemu-kvm outright, a real
+# hard dependency chain); disabling get_url's own validate_certs was also
+# rejected as an unnecessary security trade-off.
+#
+# lab_setup pre-fetches both cloud images itself via curl (unaffected by
+# this bug) and records their real sha256 checksums in the
+# cache_role_checksums fact. Injecting that as get_url's checksum default
+# here makes the vendored cache role's own get_url task recognize the
+# file it already fetched as already present and correct, taking its
+# "file already exists" shortcut instead of ever calling
+# url_get()/open_url()/make_context() at all -- sidestepping the broken
+# code path entirely without weakening certificate validation anywhere
+# (curl performs its own, completely normal TLS validation). Guarded with
+# `| default({})` and `| default('')` so this has no effect on unrelated
+# get_url tasks elsewhere in this play (e.g. prerequisites' own "Download
+# Go") -- verified locally that a non-looped get_url task with no
+# matching entry in cache_role_checksums behaves completely normally.
 - name: Setup Netris lab (prerequisites + cache)
   hosts: all
   gather_facts: true
   become: true
+  module_defaults:
+    ansible.builtin.get_url:
+      checksum: "{{ (cache_role_checksums | default({})).get(item.name | default(''), omit) }}"
   roles:
     - lab_setup
