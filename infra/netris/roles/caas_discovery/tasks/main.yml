@@ -1,4 +1,17 @@
 ---
+# Without bind-interfaces, dnsmasq binds the wildcard address (0.0.0.0:53)
+# regardless of any interface= filters, which races with libvirt's "default"
+# network dnsmasq (bound to virbr0's 192.168.122.1:53, used for mgmt-server/
+# isp-server outbound NAT -- confirmed via `virsh domiflist`, so that network
+# can't be removed). If libvirtd already grabbed its specific-address bind by
+# the time this role restarts dnsmasq, the wildcard bind fails outright
+# ("Address already in use"), confirmed live on the debug box. bind-interfaces
+# makes dnsmasq bind only its named interfaces (br-mgmt here, plus the
+# loopback address it always includes automatically) instead of the wildcard
+# address, which is exactly the coexistence case dnsmasq.conf's own comments
+# describe ("running another nameserver on the same machine") -- br-mgmt is
+# where the OCP node and discovery agents actually live (per `virsh
+# domiflist`), so this doesn't narrow anything DNS resolution actually needs.
 - name: Ensure dnsmasq listens on br-mgmt for agent DNS
   ansible.builtin.lineinfile:
     path: /etc/dnsmasq.d/ocp-sno.conf
@@ -7,6 +20,7 @@
   loop:
     - "interface=br-mgmt"
     - "no-dhcp-interface=br-mgmt"
+    - "bind-interfaces"
   register: _dnsmasq_mgmt
   notify: restart dnsmasq
 

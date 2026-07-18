@@ -117,6 +117,29 @@
   ansible.builtin.set_fact:
     caas_fulfillment_api: "https://{{ _fulfillment_host.stdout }}"
 
+# Was previously placed after "Wait for cluster template to exist" below,
+# which already invokes the osac CLI -- confirmed live that ordering left
+# the CLI unconfigured ("Error: there is no configuration, run the 'login'
+# command") the first time this step actually ran. Moved here, as soon as
+# the fulfillment host is known, so every later osac CLI invocation in this
+# role has a working config.
+- name: Ensure osac CLI config directory exists
+  ansible.builtin.file:
+    path: /root/.config/osac
+    state: directory
+    mode: "0700"
+
+- name: Configure osac CLI
+  ansible.builtin.copy:
+    content: |
+      {
+        "token_script": "oc create token -n {{ snapshot_osac_namespace | default(osac_namespace) }} admin --duration 1h",
+        "insecure": true,
+        "address": "{{ _fulfillment_host.stdout }}:443"
+      }
+    dest: /root/.config/osac/config.json
+    mode: "0600"
+
 - name: Get service account token
   ansible.builtin.shell:
     cmd: oc create token -n {{ snapshot_osac_namespace | default(osac_namespace) }} admin
@@ -230,15 +253,3 @@
           editable: true
     validate_certs: false
     status_code: [200, 201, 409]
-
-# Step 5: Configure osac CLI
-- name: Configure osac CLI
-  ansible.builtin.copy:
-    content: |
-      {
-        "token_script": "oc create token -n {{ snapshot_osac_namespace | default(osac_namespace) }} admin --duration 1h",
-        "insecure": true,
-        "address": "{{ _fulfillment_host.stdout }}:443"
-      }
-    dest: /root/.config/osac/config.json
-    mode: "0600"
