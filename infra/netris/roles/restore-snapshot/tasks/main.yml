@@ -516,6 +516,74 @@
 
 # --- Wait for cluster ready ---
 
+# recert/MCO-timing race, independent of which flavor is restored (confirmed
+# reproducing on both the bare sno-4.19-x86_64 flavor and the golden caas
+# flavor): the kubelet's on-disk config.json is written before recert
+# finishes rewriting the node's identity, so the MachineConfigDaemon boots
+# believing its rendered-master content doesn't match what's actually on
+# disk and latches Degraded ("content mismatch for file
+# /var/lib/kubelet/config.json"). Forcing a resync clears it in the common
+# case; if that alone isn't enough, clearing the node's stuck
+# reason/state annotations and restarting machine-config-daemon lets it
+# resync for real.
+- name: Force machine-config-daemon to skip its on-disk drift check
+  ansible.builtin.shell:
+    cmd: >-
+      {{ _ssh_cmd }} "sudo touch /run/machine-config-daemon-force"
+  register: _mcd_force_sync
+  until: _mcd_force_sync.rc == 0
+  retries: 10
+  delay: 10
+
+- name: Wait for MachineConfigPool master to be fully synced
+  ansible.builtin.command:
+    cmd: >-
+      oc get mcp/master
+      -o 'jsonpath={.status.conditions[?(@.type=="Updated")].status}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _mcp_master_synced
+  until: _mcp_master_synced.stdout | default('') | trim == 'True'
+  retries: 90
+  delay: 10
+  changed_when: false
+  ignore_errors: true
+
+- name: Recover MachineConfigPool master from a stuck Degraded state
+  when: _mcp_master_synced.stdout | default('') | trim != 'True'
+  block:
+    - name: Clear stuck degraded annotations on the node
+      ansible.builtin.shell:
+        cmd: >-
+          oc patch node "$(oc get nodes -o jsonpath='{.items[0].metadata.name}')"
+          --type merge
+          --patch '{"metadata":{"annotations":{"machineconfiguration.openshift.io/reason":"","machineconfiguration.openshift.io/state":"Done"}}}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _clear_degraded_annotations_pull_secret
+      until: _clear_degraded_annotations_pull_secret.rc == 0
+      retries: 10
+      delay: 10
+
+    - name: Restart machine-config-daemon to pick up the cleared state
+      ansible.builtin.command:
+        cmd: oc delete pod -n openshift-machine-config-operator -l k8s-app=machine-config-daemon
+      environment:
+        KUBECONFIG: /root/.kube/config
+
+    - name: Wait for MachineConfigPool master to be fully synced (after recovery)
+      ansible.builtin.command:
+        cmd: >-
+          oc get mcp/master
+          -o 'jsonpath={.status.conditions[?(@.type=="Updated")].status}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _mcp_master_synced_recovered
+      until: _mcp_master_synced_recovered.stdout | default('') | trim == 'True'
+      retries: 60
+      delay: 10
+      changed_when: false
+
 - name: Wait for node Ready
   ansible.builtin.shell:
     cmd: >-
