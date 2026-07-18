@@ -31,15 +31,24 @@
   changed_when: false
   ignore_errors: true
 
+# A real dispatch showed this hang indefinitely (stuck >1h48m, ansible's
+# own ConnectTimeout/ServerAliveInterval only guard SSH setup/keepalive,
+# not total command duration -- cloud-init status --wait has no timeout
+# of its own either). Bounded with `timeout` now; the outer `|| true`
+# preserves this task's original best-effort semantics (never fails the
+# play) even when the timeout kills it.
 - name: Wait for cloud-init to finish on ISP server
   when: isp_frr_check.stdout is not defined or isp_frr_check.stdout != "active"
-  shell: ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 root@192.168.122.15 "cloud-init status --wait 2>/dev/null || true"
+  shell: timeout -s 9 5m ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 root@192.168.122.15 "cloud-init status --wait 2>/dev/null || true" || true
   changed_when: false
 
+# Unlike the cloud-init wait above, this one is expected to actually
+# succeed (FRR is required for the lab to function), so a timeout here
+# should fail the play loudly rather than being swallowed.
 - name: Install and start FRR on ISP server
   when: isp_frr_check.stdout is not defined or isp_frr_check.stdout != "active"
   shell: |
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 root@192.168.122.15 "
+    timeout -s 9 5m ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 root@192.168.122.15 "
       echo 'Acquire::ForceIPv4 \"true\";' > /etc/apt/apt.conf.d/99force-ipv4
       apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y frr 2>&1 | tail -3
       sed -i '/bgpd=no/c\bgpd=yes' /etc/frr/daemons
