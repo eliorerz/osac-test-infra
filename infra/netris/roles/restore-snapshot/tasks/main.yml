@@ -619,6 +619,89 @@
   retries: 40
   delay: 30
 
+# recert's --extend-expiration regenerates every certificate it finds in
+# etcd, including MCE's self-signed cluster-proxy-signer CA -- since that CA
+# has no --use-key/--crypto-dir mapping, recert must generate a replacement
+# key itself, and it does so in PKCS#1 encoding. MCE's own
+# cluster-proxy-addon-manager only accepts PKCS#8, so it crash-loops
+# immediately after any recert-based restore that bakes in MCE. Confirmed
+# live (this flavor and caas-4-22 both hit it identically): "failed to parse
+# ca key: x509: failed to parse private key (use ParsePKCS1PrivateKey
+# instead for this key format)". MCE's own controller regenerates the
+# secret correctly (PKCS#8) once it's missing, so the fix is to delete the
+# corrupted secret and restart the deployment -- gated on the
+# multicluster-engine namespace actually existing, since flavors without
+# MCE baked in (e.g. bare sno-* images) never hit this at all.
+- name: Check if multicluster-engine namespace exists
+  ansible.builtin.command:
+    cmd: oc get namespace multicluster-engine
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _mce_namespace_check
+  until: _mce_namespace_check.rc == 0 or 'NotFound' in (_mce_namespace_check.stderr | default(''))
+  retries: 90
+  delay: 10
+  changed_when: false
+  failed_when: false
+
+- name: Recover cluster-proxy-addon-manager from a corrupted signer key
+  when: _mce_namespace_check.rc == 0
+  block:
+    - name: Check for cluster-proxy-addon-manager crash loop
+      ansible.builtin.shell:
+        cmd: |
+          oc get pods -n multicluster-engine -l app=cluster-proxy-addon-manager -o json | python3 -c "
+          import json, sys
+          pods = json.load(sys.stdin)['items']
+          for pod in pods:
+              for cs in pod.get('status', {}).get('containerStatuses', []):
+                  if cs.get('restartCount', 0) > 1:
+                      print('CRASHING')
+                      sys.exit(0)
+                  waiting = cs.get('state', {}).get('waiting', {})
+                  if waiting.get('reason') == 'CrashLoopBackOff':
+                      print('CRASHING')
+                      sys.exit(0)
+          print('OK')
+          "
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _cpam_crash_check
+      until: _cpam_crash_check.stdout | default('') | trim in ['CRASHING', 'OK']
+      retries: 9
+      delay: 10
+      changed_when: false
+      failed_when: false
+
+    - name: Delete corrupted cluster-proxy-signer secret and restart
+      when: _cpam_crash_check.stdout | default('') | trim == 'CRASHING'
+      block:
+        - name: Delete cluster-proxy-signer secret
+          ansible.builtin.command:
+            cmd: oc delete secret cluster-proxy-signer -n multicluster-engine
+          environment:
+            KUBECONFIG: /root/.kube/config
+
+        - name: Restart cluster-proxy-addon-manager deployment
+          ansible.builtin.command:
+            cmd: oc rollout restart deployment/cluster-proxy-addon-manager -n multicluster-engine
+          environment:
+            KUBECONFIG: /root/.kube/config
+
+        - name: Wait for cluster-proxy-addon-manager rollout
+          ansible.builtin.command:
+            cmd: oc rollout status deployment/cluster-proxy-addon-manager -n multicluster-engine --timeout=300s
+          environment:
+            KUBECONFIG: /root/.kube/config
+
+        - name: Wait for MultiClusterEngine to be Available
+          ansible.builtin.command:
+            cmd: >-
+              oc wait --for=jsonpath='{.status.phase}'=Available
+              multiclusterengine/multiclusterengine --timeout=120s
+          environment:
+            KUBECONFIG: /root/.kube/config
+
 - name: Report cluster status
   ansible.builtin.debug:
     msg: "{{ _co_health.stdout }}"
