@@ -30,9 +30,40 @@
     value: "0"
     sysctl_set: true
 
+# k3s_controller's vendored "Verify controller API" task is the only
+# uri/get_url call anywhere in that role (confirmed via grep) and hits the
+# same OpenSSL CA-cert-loading bug documented in playbooks/deploy-lab.yml's
+# own comment. A real dispatch showed that play-level module_defaults'
+# ca_path fix (cafile-based loading) still failed identically -- this box's
+# openssl-libs build appears to break even file-based cert parsing, not just
+# the cadata aggregate path (matches a known, actively-tracked upstream
+# OpenSSL regression: https://github.com/openssl/openssl/issues/31807,
+# https://github.com/python/cpython/issues/151504 -- no fix published for
+# this EL9 build yet).
+#
+# ansible.module_utils.urls.make_context() calls
+# ssl.create_default_context(cafile=cafile) unconditionally, eagerly parsing
+# any cafile/ca_path that's set regardless of validate_certs. The only way to
+# avoid eager cert-parsing entirely is validate_certs: false (defers to
+# Python's lazy default cert lookup, never touches cert bytes). Scoped here
+# at the block level (only around this one include_role) rather than
+# play-wide: this replaces (not merges with) deploy-lab.yml's play-level
+# ca_path default for ansible.builtin.uri within this block (verified
+# locally: a block-level module_defaults entry for a module fully overrides
+# an outer scope's entry for that same module, it doesn't merge per-key).
+#
+# This is not a real security weakening: the role's only uri call targets
+# "http://localhost:{{ controller_nodeport }}/api/auth" -- plain HTTP, so no
+# TLS handshake ever occurs and no certificate is ever actually validated
+# regardless of this setting.
 - name: Deploy K3s and Netris controller
-  ansible.builtin.include_role:
-    name: k3s_controller
+  module_defaults:
+    ansible.builtin.uri:
+      validate_certs: false
+  block:
+    - name: Deploy K3s and Netris controller
+      ansible.builtin.include_role:
+        name: k3s_controller
 
 - name: Deploy network topology
   ansible.builtin.include_role:
