@@ -710,6 +710,13 @@
         # 120s wasn't always enough for MCE to settle right after that
         # restart. Same retry treatment: re-issue a fresh `oc wait` rather
         # than relying on one 120s window.
+        #
+        # A later real dispatch exhausted all 3 retries with every single
+        # attempt's stderr showing "connection to the server ... was refused"
+        # -- on this SNO cluster the API server itself was transiently
+        # unreachable (kube-apiserver static pod cycling) for longer than the
+        # old 3*(120s timeout + 5s delay) budget covered. Raised to give a
+        # real API-server hiccup room to clear before failing the whole job.
         - name: Wait for MultiClusterEngine to be Available
           ansible.builtin.command:
             cmd: >-
@@ -719,8 +726,8 @@
             KUBECONFIG: /root/.kube/config
           register: _mce_available
           until: _mce_available.rc == 0
-          retries: 3
-          delay: 5
+          retries: 10
+          delay: 10
 
 - name: Report cluster status
   ansible.builtin.debug:
