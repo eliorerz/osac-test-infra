@@ -705,6 +705,11 @@
           retries: 2
           delay: 5
 
+        # A real dispatch showed this fail right after the
+        # cluster-proxy-addon-manager rollout retry above *succeeded* --
+        # 120s wasn't always enough for MCE to settle right after that
+        # restart. Same retry treatment: re-issue a fresh `oc wait` rather
+        # than relying on one 120s window.
         - name: Wait for MultiClusterEngine to be Available
           ansible.builtin.command:
             cmd: >-
@@ -712,6 +717,10 @@
               multiclusterengine/multiclusterengine --timeout=120s
           environment:
             KUBECONFIG: /root/.kube/config
+          register: _mce_available
+          until: _mce_available.rc == 0
+          retries: 3
+          delay: 5
 
 - name: Report cluster status
   ansible.builtin.debug:

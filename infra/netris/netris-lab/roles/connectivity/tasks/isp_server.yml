@@ -44,14 +44,22 @@
 
 # Unlike the cloud-init wait above, this one is expected to actually
 # succeed (FRR is required for the lab to function), so a timeout here
-# should fail the play loudly rather than being swallowed.
+# should fail the play loudly rather than being swallowed. A real dispatch
+# showed the original 5m budget exceeded (apt-get install occasionally
+# needs more against a slow/cold mirror) -- bumped to 10m and wrapped in a
+# retry so a transient mirror hiccup gets a fresh attempt instead of
+# failing the whole play outright.
 - name: Install and start FRR on ISP server
   when: isp_frr_check.stdout is not defined or isp_frr_check.stdout != "active"
   shell: |
-    timeout -s 9 5m ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 root@192.168.122.15 "
+    timeout -s 9 10m ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 root@192.168.122.15 "
       echo 'Acquire::ForceIPv4 \"true\";' > /etc/apt/apt.conf.d/99force-ipv4
       apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y frr 2>&1 | tail -3
       sed -i '/bgpd=no/c\bgpd=yes' /etc/frr/daemons
       test -f /tmp/frr.conf && cp /tmp/frr.conf /etc/frr/frr.conf
       systemctl restart frr
     "
+  register: _frr_install
+  until: _frr_install.rc == 0
+  retries: 1
+  delay: 5

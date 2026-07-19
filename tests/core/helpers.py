@@ -264,10 +264,17 @@ def wait_for_cluster_order_cr(*, k8s: K8sClient, uuid: str) -> str:
 
 
 def wait_for_cluster_ready(*, k8s: K8sClient, name: str) -> None:
+    # 60 min (240 * 15s) was tight enough to make this test time out with
+    # the ClusterOrder still Progressing right as osac-aap's own
+    # wait_for_clusteroperators_retries budget (also 60 min, doubled from
+    # 30 min after being confirmed too tight on cold EC2 hardware -- see
+    # osac-aap PR #427) was being exhausted, plus earlier steps in the same
+    # AAP job (create hosted cluster, retrieve kubeconfig, etc.). Doubled
+    # to stay safely above the AAP-side budget instead of racing it.
     poll_until(
         fn=lambda: k8s.get_cluster_order_phase(name=name, checked=False),
         until=lambda v: v == "Ready",
-        retries=240,
+        retries=480,
         delay=15,
         description=f"{name} ClusterOrder Ready",
     )
