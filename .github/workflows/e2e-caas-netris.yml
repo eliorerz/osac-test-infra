@@ -457,6 +457,13 @@ jobs:
       # itself flushes promptly too, since stdout isn't a TTY here.
       - name: Run CaaS e2e tests
         id: run-tests
+        # Real dispatches showed legitimately-succeeding runs taking 63-68
+        # min (wait_for_cluster_ready's own retry/backoff plus deletion and
+        # gRPC-removal waits stacked after it -- see tests/core/helpers.py).
+        # 120m leaves real margin above that observed range while still
+        # bounding worst-case runtime/cost if something is genuinely stuck,
+        # well under the job's own 360m cap.
+        timeout-minutes: 120
         shell: bash
         env:
           E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"

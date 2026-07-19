@@ -33,22 +33,42 @@ def poll_until(
     *, fn: Callable[[], T], until: Callable[[T], bool], retries: int = 60, delay: int = 5, description: str
 ) -> T:
     value: T | None = None
+    last_error: subprocess.CalledProcessError | None = None
     start = time.monotonic()
     last_logged = start
     logger.info("Waiting for %s...", description)
     for attempt in range(retries):
-        value = fn()
-        if until(value):
-            logger.info("%s — done after %.0fs", description, time.monotonic() - start)
-            return value
+        # A transient subprocess failure (e.g. a flaky grpcurl call hitting a
+        # momentarily-busy route right after heavy cluster-deletion activity)
+        # used to propagate immediately and fail the whole test on the very
+        # first hiccup, even though poll_until's entire purpose is to retry.
+        # Confirmed via two real CI runs: both got through cluster creation
+        # AND deletion successfully, then failed outright on a single
+        # CalledProcessError from wait_for_cluster_grpc_removal's grpcurl
+        # call. Treated the same as a not-yet-satisfied value instead.
+        try:
+            value = fn()
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            value = None
+        else:
+            last_error = None
+            if until(value):
+                logger.info("%s — done after %.0fs", description, time.monotonic() - start)
+                return value
         now = time.monotonic()
         if now - last_logged >= _PROGRESS_LOG_INTERVAL_S:
             logger.info(
-                "Still waiting for %s (attempt %d/%d, %.0fs elapsed, last value: %r)",
+                "Still waiting for %s (attempt %d/%d, %.0fs elapsed, last value: %r%s)",
                 description, attempt + 1, retries, now - start, value,
+                f", last error: {last_error}" if last_error else "",
             )
             last_logged = now
         time.sleep(delay)
+    if last_error is not None:
+        raise TimeoutError(
+            f"{description} — timeout after {retries * delay}s, last call failed: {last_error}"
+        ) from last_error
     raise TimeoutError(f"{description} — timeout after {retries * delay}s, last value: {value!r}")
 
 
