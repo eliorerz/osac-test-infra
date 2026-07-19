@@ -76,6 +76,16 @@ on:
         required: false
         type: string
         default: ""
+      osac-installer-repo:
+        description: "Override osac-installer git URI (e.g. a personal fork, to test a PR pre-merge) -- empty means the upstream repo. Consumed by infra/netris/roles/osac_refresh's existing 'Clone osac-installer' task."
+        required: false
+        type: string
+        default: ""
+      osac-installer-branch:
+        description: "Branch, tag, or commit of osac-installer to clone -- empty means main. Consumed by infra/netris/roles/osac_refresh's existing 'Clone osac-installer' task."
+        required: false
+        type: string
+        default: ""
     outputs:
       result:
         description: "Overall result: PASSED or FAILED"
@@ -231,8 +241,10 @@ jobs:
           OSAC_AAP_EE_IMAGE: ${{ inputs.osac-aap-ee-image }}
           OSAC_AAP_REPO: ${{ inputs.osac-aap-repo }}
           OSAC_AAP_BRANCH: ${{ inputs.osac-aap-branch }}
+          OSAC_INSTALLER_REPO: ${{ inputs.osac-installer-repo }}
+          OSAC_INSTALLER_BRANCH: ${{ inputs.osac-installer-branch }}
         run: |
-          for name in OSAC_INSTALLER_IMAGE OSAC_OPERATOR_IMAGE FULFILLMENT_SERVICE_IMAGE FULFILLMENT_SERVICE_BRANCH OSAC_AAP_EE_IMAGE OSAC_AAP_REPO OSAC_AAP_BRANCH; do
+          for name in OSAC_INSTALLER_IMAGE OSAC_OPERATOR_IMAGE FULFILLMENT_SERVICE_IMAGE FULFILLMENT_SERVICE_BRANCH OSAC_AAP_EE_IMAGE OSAC_AAP_REPO OSAC_AAP_BRANCH OSAC_INSTALLER_REPO OSAC_INSTALLER_BRANCH; do
             value="${!name}"
             if [[ -n "$value" ]] && [[ ! "$value" =~ ^[A-Za-z0-9._/:@-]+$ ]]; then
               echo "::error::${name} contains characters outside a valid reference (letters, digits, and ._/:@- only): ${value}"
@@ -251,17 +263,18 @@ jobs:
       # Makefile/ansible defaults apply otherwise.
       #
       # osac-installer-image is deliberately NOT included in this JSON:
-      # infra/netris has no osac_installer_image ansible var (only
-      # osac_installer_repo/osac_installer_branch/osac_installer_dir --
-      # confirmed by reading infra/netris/inventory/group_vars/all.yml and
-      # roles/osac_install/tasks/main.yml). Prow's own handling of this
-      # exact input wasn't a simple extra-var either -- it podman-pulled the
-      # image, extracted the installer binary via `podman create`+`cp`, and
-      # set osac_installer_skip_clone: true so ansible wouldn't re-clone it.
-      # That extraction logic belongs in the real deploy step (a later PR in
-      # this series), not this plumbing-only step -- passing it through
-      # naively here would silently no-op since ansible ignores unknown
-      # extra-vars.
+      # infra/netris has no osac_installer_image ansible var. Prow's own
+      # handling of this exact input wasn't a simple extra-var either -- it
+      # podman-pulled the image, extracted the installer binary via
+      # `podman create`+`cp`, and set osac_installer_skip_clone: true so
+      # ansible wouldn't re-clone it. That extraction logic belongs in the
+      # real deploy step (a later PR in this series), not this
+      # plumbing-only step -- passing it through naively here would
+      # silently no-op since ansible ignores unknown extra-vars.
+      # osac_installer_repo/osac_installer_branch, by contrast, ARE real
+      # ansible vars (confirmed via infra/netris/inventory/group_vars/all.yml
+      # and roles/osac_refresh's "Clone osac-installer" task) and are
+      # included below.
       - name: Build component image overrides
         id: extra-vars
         shell: bash
@@ -272,6 +285,8 @@ jobs:
           OSAC_AAP_EE_IMAGE: ${{ inputs.osac-aap-ee-image }}
           OSAC_AAP_REPO: ${{ inputs.osac-aap-repo }}
           OSAC_AAP_BRANCH: ${{ inputs.osac-aap-branch }}
+          OSAC_INSTALLER_REPO: ${{ inputs.osac-installer-repo }}
+          OSAC_INSTALLER_BRANCH: ${{ inputs.osac-installer-branch }}
         run: |
           if ! command -v jq >/dev/null 2>&1; then
             sudo dnf install -y jq
@@ -284,6 +299,8 @@ jobs:
             [osac_aap_image]="$OSAC_AAP_EE_IMAGE"
             [osac_aap_repo]="$OSAC_AAP_REPO"
             [osac_aap_branch]="$OSAC_AAP_BRANCH"
+            [osac_installer_repo]="$OSAC_INSTALLER_REPO"
+            [osac_installer_branch]="$OSAC_INSTALLER_BRANCH"
           )
           for key in "${!OVERRIDES[@]}"; do
             value="${OVERRIDES[$key]}"

@@ -54,6 +54,14 @@ on:
         description: "Branch, tag, or commit of osac-aap for the AAP Project to sync ansible content from -- empty means whatever's already baked into the snapshot's values file."
         required: false
         default: ""
+      osac-installer-repo:
+        description: "Override osac-installer git URI (e.g. a personal fork, to test a PR pre-merge) -- empty means the upstream repo. Not sensitive: a public repo URL."
+        required: false
+        default: ""
+      osac-installer-branch:
+        description: "Branch, tag, or commit of osac-installer to clone -- empty means main."
+        required: false
+        default: ""
 
 jobs:
   e2e-caas-netris:
@@ -68,3 +76,5 @@ jobs:
       osac-aap-ee-image: ${{ inputs.osac-aap-ee-image || '' }}
       osac-aap-repo: ${{ inputs.osac-aap-repo || '' }}
       osac-aap-branch: ${{ inputs.osac-aap-branch || '' }}
+      osac-installer-repo: ${{ inputs.osac-installer-repo || '' }}
+      osac-installer-branch: ${{ inputs.osac-installer-branch || '' }}
