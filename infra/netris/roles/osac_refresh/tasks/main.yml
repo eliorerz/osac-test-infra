@@ -190,9 +190,18 @@
 # the snapshot restore -- gathered diagnostics showed CNI not ready yet
 # ("no CNI configuration file"), the topolvm.io CSI driver not yet
 # registered, and an origin-cli image pull backoff, all self-resolving
-# within ~13min of the restore. Same retry treatment as the
-# MultiClusterEngine/cluster-proxy-addon-manager waits elsewhere in this repo:
-# re-issue a fresh `oc rollout status` rather than relying on one 300s window.
+# within ~13min of the restore.
+#
+# A second real dispatch showed the first retry budget (5 retries, 10s
+# delay) was far too thin: once a Deployment's own ProgressDeadlineExceeded
+# condition is set, `oc rollout status` returns almost instantly reporting
+# that stale condition rather than waiting anywhere near its --timeout --
+# confirmed directly (all 5 retries completed within ~1s of each other in
+# the job log). Diagnostics from that run showed keycloak-database-0 still
+# cycling through ImagePullBackOff for origin-cli:4.20.0 at the 17min mark,
+# well past this task's old ~1min of real effective wait. Raised to give
+# the underlying image-pull/CNI/CSI stabilization real wall-clock room,
+# matching the ~13-17min+ pattern observed twice now.
 - name: Wait for Keycloak to be ready
   ansible.builtin.shell:
     cmd: oc rollout status deploy/keycloak-service -n keycloak --timeout=300s
@@ -200,8 +209,8 @@
     KUBECONFIG: /root/.kube/config
   register: _keycloak_rollout
   until: _keycloak_rollout.rc == 0
-  retries: 5
-  delay: 10
+  retries: 40
+  delay: 30
 
 - name: Read existing Keycloak client secrets and patch realm.json (OSAC-2115)
   ansible.builtin.shell:
