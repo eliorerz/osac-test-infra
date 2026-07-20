@@ -49,6 +49,15 @@
 # needs more against a slow/cold mirror) -- bumped to 10m and wrapped in a
 # retry so a transient mirror hiccup gets a fresh attempt instead of
 # failing the whole play outright.
+#
+# A from-scratch dispatch showed the single retry exhausted almost
+# instantly on "Could not get lock /var/lib/apt/lists/lock" -- on a
+# genuinely fresh VM boot, cloud-init's own background apt activity
+# (unattended-upgrades/apt-daily.timer) can still hold the lock for a
+# while after cloud-init itself reports done, and the old 1-retry budget
+# gave that no time to clear. Each failed attempt returns in ~1s (it's a
+# lock check, not the 10m ssh timeout), so retries are cheap -- raised to
+# give the other process real time to finish.
 - name: Install and start FRR on ISP server
   when: isp_frr_check.stdout is not defined or isp_frr_check.stdout != "active"
   shell: |
@@ -61,5 +70,5 @@
     "
   register: _frr_install
   until: _frr_install.rc == 0
-  retries: 1
-  delay: 5
+  retries: 20
+  delay: 15
