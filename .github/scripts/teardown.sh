@@ -65,12 +65,53 @@ fi
 
 SUSHY_CONFIG_DIR="${HOME}/sushy-${CLONE_NAME}"
 SUSHY_PID_FILE="${SUSHY_CONFIG_DIR}/sushy.pid"
+SUSHY_PID=""
 if [[ -f "${SUSHY_PID_FILE}" ]]; then
-  echo "Stopping sushy-emulator..."
-  kill "$(cat "${SUSHY_PID_FILE}")" 2>/dev/null || true
+  SUSHY_PID=$(cat "${SUSHY_PID_FILE}")
+  echo "Stopping sushy-emulator (PID ${SUSHY_PID})..."
+  kill "${SUSHY_PID}" 2>/dev/null || true
+  for i in $(seq 1 10); do
+    if ! kill -0 "${SUSHY_PID}" 2>/dev/null; then
+      break
+    fi
+    if [[ "${i}" -eq 10 ]]; then
+      echo "  SIGTERM did not stop sushy-emulator, sending SIGKILL..."
+      kill -9 "${SUSHY_PID}" 2>/dev/null || true
+    fi
+    sleep 1
+  done
   rm -f "${SUSHY_PID_FILE}"
 fi
 
 if [[ -d "${SUSHY_CONFIG_DIR}" ]]; then
   rm -rf "${SUSHY_CONFIG_DIR}"
+fi
+
+# --- Verify BMaaS cleanup ---
+# Fail the job if critical resources leaked so we're notified early.
+BMH_LEAKED=false
+REMAINING_VMS=$(${VIRSH} list --all --name 2>/dev/null | grep "^${BMH_VM_PREFIX}" || true)
+if [[ -n "${REMAINING_VMS}" ]]; then
+  echo "ERROR: VMs still present after cleanup:" >&2
+  echo "${REMAINING_VMS}" >&2
+  BMH_LEAKED=true
+fi
+if ${VIRSH} pool-info "${BMH_POOL_NAME}" &>/dev/null; then
+  echo "ERROR: Storage pool '${BMH_POOL_NAME}' still present after cleanup" >&2
+  BMH_LEAKED=true
+fi
+if [[ -n "${SUSHY_PID}" ]] && kill -0 "${SUSHY_PID}" 2>/dev/null; then
+  echo "ERROR: sushy-emulator process still running (PID ${SUSHY_PID})" >&2
+  BMH_LEAKED=true
+fi
+if [[ -d "${BMH_DISK_DIR}" ]]; then
+  echo "ERROR: Disk directory '${BMH_DISK_DIR}' still present after cleanup" >&2
+  BMH_LEAKED=true
+fi
+if [[ -d "${SUSHY_CONFIG_DIR}" ]]; then
+  echo "ERROR: Sushy config directory '${SUSHY_CONFIG_DIR}' still present after cleanup" >&2
+  BMH_LEAKED=true
+fi
+if [[ "${BMH_LEAKED}" == "true" ]]; then
+  exit 1
 fi
