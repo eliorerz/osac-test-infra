@@ -24,4 +24,5 @@ reports/
 infra/*/.env.infra
 
 # Workflow artifacts
+# AI workflow artifacts
 .artifacts/
