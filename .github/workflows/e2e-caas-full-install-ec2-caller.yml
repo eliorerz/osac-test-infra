@@ -4,21 +4,15 @@ name: E2E CaaS Full Install (EC2)
 permissions:
   contents: read
 
-# SKELETON: this file exists on main only so the workflow_dispatch trigger
-# is registered (GitHub requires a workflow_dispatch workflow to exist on
-# the default branch before it becomes dispatchable at all, even to run a
-# different ref's content). The real implementation -- this caller plus
-# the reusable e2e-caas-full-install-ec2.yml it calls -- lives on the
-# caas-full-install-ec2 branch and is dispatched via
-# `gh workflow run e2e-caas-full-install-ec2-caller.yml --ref
-# caas-full-install-ec2`, which runs the FULL workflow definition from that
-# ref (including this same file's real body), not this placeholder. This
-# skeleton will be replaced by that branch's real content once it's proven
-# via real dispatches and merged as its own PR.
-#
 # workflow_dispatch only for now -- no schedule yet, unlike
-# e2e-caas-netris-caller.yml (which only added its own schedule once that
-# mechanism was proven in real dispatches).
+# e2e-caas-netris-caller.yml (which only added its own schedule once this
+# mechanism was proven in real dispatches). Add a schedule here once this
+# has a track record of passing reliably.
+#
+# AMI id, subnet id, and security group id are NOT dispatch inputs: this
+# repo is public, and workflow_dispatch inputs are visible forever in the
+# Actions run history/API to anyone. The reusable workflow fetches them from
+# Vault instead (see .github/actions/fetch-ec2-runner-network-config).
 on:
   workflow_dispatch:
     inputs:
@@ -55,11 +49,13 @@ on:
         default: ""
 
 jobs:
-  skeleton:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Explain this placeholder
-        run: |
-          echo "This is a registration skeleton for e2e-caas-full-install-ec2-caller.yml."
-          echo "Dispatch with --ref caas-full-install-ec2 to run the real implementation."
-          exit 1
+  e2e-caas-full-install-ec2:
+    uses: ./.github/workflows/e2e-caas-full-install-ec2.yml
+    with:
+      instance-type: ${{ inputs.instance-type || 'c5n.metal' }}
+      aws-region: ${{ inputs.aws-region || 'us-east-1' }}
+      tooling-check-cmds: ${{ inputs.tooling-check-cmds || 'dnf install -y libvirt qemu-kvm virt-install podman skopeo zstd pigz jq haproxy git; systemctl enable --now libvirtd; command -v virt-install' }}
+      test-filter: ${{ inputs.test-filter || '' }}
+      image-overrides: ${{ inputs.image-overrides || '{}' }}
+      installer-repo: ${{ inputs.installer-repo || '' }}
+      installer-ref: ${{ inputs.installer-ref || '' }}
