@@ -165,6 +165,26 @@
 # install-prereqs, install-osac are osac-installer's own Makefile targets
 # (Helm-based), the same ones that workflow already runs successfully
 # against a clean sno-4-22 boot.
+#
+# openshift-marketplace's catalog-source pods are created automatically
+# during cluster boot/recert, *before* restore-snapshot's own "Fix
+# pull-secret in openshift-config" workaround (recert writes the
+# pull-secret's value as a literal path instead of real JSON content) has
+# propagated to the node's /var/lib/kubelet/config.json via the MCP resync
+# it waits for. So these pods attempt their initContainer image pull with
+# the still-broken secret, land in ImagePullBackOff, and never retry on
+# their own even once the file is corrected -- confirmed live on a
+# sno-4-22 restore (redhat-operators/community-operators/certified-operators
+# all stuck 17+ minutes later). Invisible on the golden caas snapshot, which
+# never needs a fresh registry pull post-restore. Deleting them forces a
+# recreate against the by-then-corrected file.
+- name: Restart marketplace catalog pods to pick up the corrected pull-secret
+  ansible.builtin.command:
+    cmd: oc delete pods -n openshift-marketplace -l olm.managed=true --ignore-not-found
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: true
+
 - name: Wait for CatalogSource redhat-operators to be READY
   ansible.builtin.command:
     cmd: >-
@@ -173,6 +193,10 @@
   environment:
     KUBECONFIG: /root/.kube/config
   changed_when: false
+  register: _catalogsource_ready
+  until: _catalogsource_ready.rc == 0
+  retries: 3
+  delay: 5
 
 - name: Install OLM operators (make install-operators)
   ansible.builtin.command:
