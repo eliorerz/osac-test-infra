@@ -4,29 +4,14 @@ name: E2E CaaS Netris Full Install
 permissions:
   contents: read
 
-# SKELETON: this file exists on main only so the workflow_dispatch trigger
-# is registered (GitHub requires a workflow_dispatch workflow to exist on
-# the default branch before it becomes dispatchable at all, even to run a
-# different ref's content). The real implementation -- this caller plus
-# the reusable e2e-caas-netris-full-install.yml it calls -- lives on the
-# OSAC-2801-caas-netris-hybrid-install branch and is dispatched via
-# `gh workflow run e2e-caas-netris-full-install-caller.yml --ref
-# OSAC-2801-caas-netris-hybrid-install`, which runs the FULL workflow
-# definition from that ref (including this same file's real body), not
-# this placeholder. This skeleton will be replaced by that branch's real
-# content once it's proven via real dispatches and merged as its own PR.
-#
-# This replaces the now-abandoned e2e-caas-full-install-ec2-caller.yml
-# skeleton (from PR #254): that direction (a Netris-free CaaS install on
-# our own EC2 fleet) turned out to be redundant with osac-test-infra PR
-# #232, which already covers it on the shared fleet. This workflow
-# combines that same fast cluster-tool boot mechanism with real Netris
-# networking/discovery instead of skipping Netris entirely -- see the
-# OSAC-2801-caas-netris-hybrid-install branch for the design rationale.
-#
 # workflow_dispatch only for now -- no schedule yet, unlike
 # e2e-caas-netris-caller.yml (which only added its own schedule once that
 # mechanism was proven in real dispatches).
+#
+# AMI id, subnet id, and security group id are NOT dispatch inputs: this
+# repo is public, and workflow_dispatch inputs are visible forever in the
+# Actions run history/API to anyone. The reusable workflow fetches them from
+# Vault instead (see .github/actions/fetch-ec2-runner-network-config).
 on:
   workflow_dispatch:
     inputs:
@@ -63,11 +48,13 @@ on:
         default: ""
 
 jobs:
-  skeleton:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Explain this placeholder
-        run: |
-          echo "This is a registration skeleton for e2e-caas-netris-full-install-caller.yml."
-          echo "Dispatch with --ref OSAC-2801-caas-netris-hybrid-install to run the real implementation."
-          exit 1
+  e2e-caas-netris-full-install:
+    uses: ./.github/workflows/e2e-caas-netris-full-install.yml
+    with:
+      instance-type: ${{ inputs.instance-type || 'c5n.metal' }}
+      aws-region: ${{ inputs.aws-region || 'us-east-1' }}
+      tooling-check-cmds: ${{ inputs.tooling-check-cmds || 'dnf install -y libvirt qemu-kvm virt-install podman skopeo zstd pigz jq haproxy git ansible-core python3-pip make; systemctl enable --now libvirtd; pip3 install ansible; command -v virt-install; command -v ansible-playbook; command -v make' }}
+      test-filter: ${{ inputs.test-filter || '' }}
+      image-overrides: ${{ inputs.image-overrides || '{}' }}
+      installer-repo: ${{ inputs.installer-repo || '' }}
+      installer-ref: ${{ inputs.installer-ref || '' }}
