@@ -345,15 +345,23 @@ jobs:
           echo "=== agent VM storage ==="
           mkdir -p /data/osac-storage
 
-      - name: Validate and bootstrap
-        id: setup
-        uses: ./.github/actions/validate-and-bootstrap
-        with:
-          test-suite: ${{ inputs.test-suite || 'caas' }}
-          run-id: ${{ github.run_id }}
-          component-repo: ${{ inputs.component-repo }}
-          component-ref: ${{ inputs.component-ref }}
-          component-image-key: ${{ inputs.component-image-key }}
+      # Not ./.github/actions/validate-and-bootstrap: its "Read AppRole
+      # credentials" sub-step hard-fails when Vault trust isn't present,
+      # which this ephemeral box never has (same reasoning as
+      # e2e-caas-netris.yml's own test job, which also doesn't call it --
+      # secrets are pre-staged by push-secrets on the trusted orchestrator
+      # instead). Only the clone-name derivation is needed here, so inline
+      # just that sub-step's logic.
+      - name: Set clone name
+        shell: bash
+        env:
+          SUITE: ${{ inputs.test-suite || 'caas' }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          SUITE=$(echo "${SUITE}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
+          CLONE_NAME="${SUITE:0:1}${RUN_ID: -7}-${SUITE}"
+          echo "CLONE_NAME=${CLONE_NAME}" >> "$GITHUB_ENV"
+          echo "Clone name: ${CLONE_NAME}"
 
       - name: Prepare cluster environment
         env:
