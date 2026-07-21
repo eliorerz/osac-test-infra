@@ -119,6 +119,28 @@
     remote_src: true
   when: not _ct_bin.stat.exists
 
+# cluster-tool boot's own steps talk to the VM directly by IP over SSH, so
+# boot itself succeeds without this -- but the kubeconfig it writes
+# references the cluster by its "api.test-infra-cluster-<id>.redhat.com"
+# hostname (like any real OCP kubeconfig), which only resolves for clients
+# on that clone's own per-network libvirt dnsmasq. `cluster-tool setup
+# client` is what makes the *host* (where oc/ansible actually run
+# afterward) able to resolve it too: installs dnsmasq, points
+# NetworkManager's dns= at it (so it can pick up libvirt's per-network
+# forwarders), and restarts NetworkManager to apply it. Confirmed live:
+# without this, `oc wait` fails immediately with a DNS lookup error, not a
+# timeout. Guarded on its own marker file so the (network-manager-restarting)
+# setup only runs once.
+- name: Check if cluster-tool client DNS setup already ran
+  ansible.builtin.stat:
+    path: /etc/NetworkManager/conf.d/cluster-tool-dns.conf
+  register: _ct_dns_configured
+
+- name: Run cluster-tool client DNS setup
+  ansible.builtin.command:
+    cmd: "{{ cluster_tool_bin }} setup client"
+  when: not _ct_dns_configured.stat.exists
+
 - name: Ensure cluster-tool config directory exists
   ansible.builtin.file:
     path: /root/.config/cluster-tool
