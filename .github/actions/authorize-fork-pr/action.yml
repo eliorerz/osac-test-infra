@@ -55,6 +55,23 @@ runs:
         fi
         echo "::endgroup::"
 
+        echo "::group::Check trusted bot allowlist"
+        # osac-jira-ai-issue-solver is a GitHub App (a Bot identity), not a
+        # user account, so it can never satisfy the org-membership check
+        # below -- every PR it opens would otherwise need a human to
+        # comment /ok-to-test. It only ever opens PRs via the org-owned
+        # osac-dev-bot fork in response to a Jira ticket, so it's trusted
+        # the same way an org member would be.
+        TRUSTED_BOT_AUTHORS=("osac-jira-ai-issue-solver[bot]")
+        for trusted in "${TRUSTED_BOT_AUTHORS[@]}"; do
+          if [[ "${PR_AUTHOR}" == "${trusted}" ]]; then
+            echo "Fork PR authorized: '${PR_AUTHOR}' is an allowlisted trusted bot."
+            echo "::endgroup::"
+            exit 0
+          fi
+        done
+        echo "::endgroup::"
+
         echo "::group::Check org membership"
         # URL-encode PR_AUTHOR -- bot accounts like "some-bot[bot]" contain
         # characters (`[`, `]`) that make the URL invalid otherwise, which
