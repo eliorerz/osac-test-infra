@@ -1,5 +1,5 @@
 .PHONY: setup-infra deploy-infra deploy-osac \
-       setup-caas \
+       setup-caas configure-netris-hybrid \
        destroy-osac destroy-infra \
        gather-infra gather-caas cleanup-dns
 
@@ -31,6 +31,15 @@ deploy-osac:
 
 setup-caas:
 	$(MAKE) -f Makefile setup-caas EXTRA_VARS='$(EXTRA_VARS)'
+
+# Not part of the formal backend contract (infra/contract.md's target list
+# doesn't include it, same rationale as cleanup-dns below) -- wires a
+# cluster-tool-booted control plane into this lab's real Netris networking.
+# Only used by e2e-caas-netris-full-install.yml's hybrid flow; the golden-
+# snapshot flow (deploy-osac, above) does this as part of
+# restore-ocp-snapshot/post-snapshot-refresh instead.
+configure-netris-hybrid:
+	ansible-playbook playbooks/configure-netris-hybrid.yml $(ANSIBLE_EXTRA)
 
 # --- Destroy ---
 

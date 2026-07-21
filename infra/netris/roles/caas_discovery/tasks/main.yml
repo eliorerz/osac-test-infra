@@ -25,6 +25,13 @@
     state: restarted
   when: _dnsmasq_mgmt is changed
 
+# caas_discovery_ocp_target_ip defaults to ocp_dnat_ip (the golden-snapshot/
+# recert path's Netris-managed DNAT address for the control plane). When the
+# control plane is a cluster-tool clone outside Netris instead, this is
+# overridden to the host's own br-mgmt address -- cluster-tool's haproxy
+# already reverse-proxies API/ingress on every host interface, so anything
+# on br-mgmt (agents included) reaches OCP through that instead of a DNAT
+# rule that was never created for this control plane.
 - name: Configure OCP DNS on mgmt-server for agent discovery
   ansible.builtin.shell:
     cmd: |
@@ -39,8 +46,8 @@
 
         # Write OCP DNS config — listen on mgmt IP only to avoid conflict with systemd-resolved
         mkdir -p /etc/dnsmasq.d
-        DESIRED='address=/api.{{ ocp_cluster_name }}.{{ ocp_base_domain }}/{{ ocp_dnat_ip }}
-      address=/.apps.{{ ocp_cluster_name }}.{{ ocp_base_domain }}/{{ ocp_dnat_ip }}
+        DESIRED='address=/api.{{ ocp_cluster_name }}.{{ ocp_base_domain }}/{{ caas_discovery_ocp_target_ip | default(ocp_dnat_ip) }}
+      address=/.apps.{{ ocp_cluster_name }}.{{ ocp_base_domain }}/{{ caas_discovery_ocp_target_ip | default(ocp_dnat_ip) }}
       listen-address=192.168.16.1
       bind-interfaces'
         if [ ! -f /etc/dnsmasq.d/ocp-sno.conf ] || [ \"\$(cat /etc/dnsmasq.d/ocp-sno.conf)\" != \"\$DESIRED\" ]; then

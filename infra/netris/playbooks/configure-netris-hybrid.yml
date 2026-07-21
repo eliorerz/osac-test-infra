@@ -1,0 +1,21 @@
+---
+# Wires a cluster-tool-booted OCP control plane into a real Netris lab:
+# registers Netris networking metadata (VPC/IPAM + the ns-only worker-fabric
+# server-cluster-template) without placing the control plane itself inside
+# a Netris VPC (it isn't Netris-managed at all -- see netris_configure's own
+# comment), then patches cluster-fulfillment-ig with the lab's real
+# NETRIS_CONTROLLER_URL/DNS/SSH config, skipping the ingress-forwarder
+# osac_post_refresh normally sets up (cluster-tool's own haproxy already
+# reverse-proxies OCP API/ingress on every host interface, including
+# br-mgmt). Assumes /root/.kube/config already points at the cluster-tool
+# clone (see e2e-caas-netris-full-install.yml's "Stage kubeconfig for
+# Netris wiring" step).
+- name: Configure Netris networking for a cluster-tool-booted control plane
+  hosts: all
+  gather_facts: false
+  vars:
+    netris_configure_control_plane_networking: false
+    osac_post_refresh_manage_ingress_forwarder: false
+  roles:
+    - netris_configure
+    - osac_post_refresh

@@ -48,6 +48,17 @@
     ipam_tenant_id: 1
     ipam_vpc_id: "{{ vpc_id }}"
 
+# The VNet/SNAT/DNAT block below places ONE specific control-plane VM
+# (hardcoded to hgx-pod00-su0-h00's eth9 via ocp_server_ports) inside the
+# ocp_vpc_name VPC and gives it Netris-managed SNAT/DNAT. Only relevant
+# when the OCP control plane itself is a Netris-managed VM (the
+# golden-snapshot/recert path) -- skip it when the control plane is a
+# cluster-tool clone living outside Netris entirely (reachable instead via
+# cluster-tool's own haproxy on br-mgmt). The VPC/IPAM allocation above
+# stays unconditional either way: osac_post_refresh's NETRIS_MGMT_VPC_ID
+# still needs a real VPC id regardless of where the control plane lives --
+# it's consumed by netris.steps for hosted-cluster/agent networking on
+# h01-h03, a separate concern from control-plane placement.
 - name: Create VNet for OCP server
   ansible.builtin.include_role:
     name: netris.controller.vnet
@@ -60,6 +71,7 @@
     vnet_gateway: "{{ ocp_gateway }}"
     vnet_dhcp_enabled: false
     vnet_ports: "{{ ocp_server_ports }}"
+  when: netris_configure_control_plane_networking | default(true)
 
 - name: Create SNAT rule for OCP VNet
   ansible.builtin.include_role:
@@ -72,6 +84,7 @@
     nat_vpc_id: "{{ vpc_id }}"
     nat_source_address: "{{ ocp_subnet_cidr }}"
     nat_snat_to_ip: "{{ ocp_snat_ip }}"
+  when: netris_configure_control_plane_networking | default(true)
 
 - name: Create DNAT rule for OCP (API + Ingress)
   ansible.builtin.include_role:
@@ -85,6 +98,7 @@
     nat_vpc_id: "{{ vpc_id }}"
     nat_destination_address: "{{ ocp_dnat_ip }}/32"
     nat_dnat_to_ip: "{{ ocp_node_ip }}"
+  when: netris_configure_control_plane_networking | default(true)
 
 - name: Check if NS-only server cluster template exists
   ansible.builtin.uri:
