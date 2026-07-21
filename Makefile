@@ -34,6 +34,7 @@ test-bmaas:
 INFRA       ?= netris
 SUITE       ?= caas
 EXTRA_VARS  ?=
+INSTALL_MODE ?=
 INFRA_DIR    = infra/$(INFRA)
 
 .PHONY: e2e setup-infra deploy-infra deploy-osac setup-suite run-tests \
@@ -77,7 +78,7 @@ deploy-infra: _validate-backend
 	$(MAKE) -C $(INFRA_DIR) -f contract.mk deploy-infra EXTRA_VARS='$(EXTRA_VARS)'
 
 deploy-osac: _validate-backend
-	$(MAKE) -C $(INFRA_DIR) -f contract.mk deploy-osac EXTRA_VARS='$(EXTRA_VARS)'
+	$(MAKE) -C $(INFRA_DIR) -f contract.mk deploy-osac EXTRA_VARS='$(EXTRA_VARS)' INSTALL_MODE='$(INSTALL_MODE)'
 
 setup-suite: _validate-backend
 	$(MAKE) -C $(INFRA_DIR) -f contract.mk setup-$(SUITE) EXTRA_VARS='$(EXTRA_VARS)'

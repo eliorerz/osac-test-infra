@@ -65,6 +65,22 @@ on:
         description: "Branch, tag, or commit of osac-installer to clone -- empty means main."
         required: false
         default: ""
+      flavor-name:
+        description: "cluster-tool snapshot flavor to restore -- 'caas' (default) is the golden snapshot with OSAC/AAP already installed. 'sno-4-22' is a clean snapshot with no OSAC baked in; pair it with install-mode: snapshot-fresh."
+        required: false
+        type: choice
+        options:
+          - "caas"
+          - "sno-4-22"
+        default: "caas"
+      install-mode:
+        description: "How make deploy-osac installs OSAC after restoring the snapshot -- snapshot-adopt (default) adopts the golden snapshot's existing Helm release; snapshot-fresh runs a real install-operators/install-prereqs/install-osac sequence (use with flavor-name: sno-4-22)."
+        required: false
+        type: choice
+        options:
+          - "snapshot-adopt"
+          - "snapshot-fresh"
+        default: "snapshot-adopt"
   # 8x/day (every 3h). Offset 17 minutes past the hour, not on the hour,
   # since GitHub Actions' shared cron scheduler queues everyone's on-the-hour
   # schedules together and can delay/drop them under load.
@@ -86,3 +102,5 @@ jobs:
       osac-aap-branch: ${{ inputs.osac-aap-branch || '' }}
       osac-installer-repo: ${{ inputs.osac-installer-repo || '' }}
       osac-installer-branch: ${{ inputs.osac-installer-branch || '' }}
+      flavor-name: ${{ inputs.flavor-name || 'caas' }}
+      install-mode: ${{ inputs.install-mode || 'snapshot-adopt' }}

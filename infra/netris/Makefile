@@ -1,6 +1,7 @@
 .PHONY: deploy deploy-fast setup deploy-lab deploy-ocp deploy-ocp-snapshot deploy-osac \
        restore-ocp-snapshot snapshot-refresh prep-snapshot-refresh \
        run-snapshot-refresh post-snapshot-refresh \
+       deploy-ocp-snapshot-fresh install-osac-fresh \
        setup-caas deploy-caas \
        deploy-vmaas deploy-bmaas \
        destroy destroy-osac destroy-ocp destroy-caas destroy-vmaas destroy-bmaas \
@@ -82,6 +83,19 @@ run-snapshot-refresh:
 
 post-snapshot-refresh:
 	ansible-playbook playbooks/post-snapshot-refresh.yml $(ANSIBLE_EXTRA)
+
+# Snapshot-based deployment onto a *clean* flavor (no OSAC baked in) --
+# restores the same way deploy-ocp-snapshot does, then runs a real
+# install-operators/install-prereqs/install-osac sequence instead of
+# adopting an existing Helm release. Selected via install_mode:
+# snapshot-fresh (see contract.mk's deploy-osac). Reuses post-osac (MCE
+# OS_IMAGES filtering) and post-snapshot-refresh (Netris wiring: SSH keys,
+# socat forwarder, cluster-fulfillment-ig) unchanged -- both are already
+# generic across adopt/fresh, only the install step itself differs.
+deploy-ocp-snapshot-fresh: restore-ocp-snapshot install-osac-fresh post-osac post-snapshot-refresh
+
+install-osac-fresh:
+	ansible-playbook playbooks/install-osac-fresh.yml $(ANSIBLE_EXTRA)
 
 # Destroy targets
 destroy:

@@ -67,8 +67,17 @@ osac_aap_branch: ""
 osac_aap_image: ""
 
 # Snapshot-based deployment (fast path)
-snapshot_flavor_image: "quay.io/osac-project/cluster-flavors:caas"
-snapshot_flavor_dir: "/var/cache/netris-lab/cluster-flavors/caas"
+# snapshot_flavor_name defaults to the golden CaaS flavor (OCP+OSAC/AAP
+# already installed -- restore-ocp-snapshot + snapshot-refresh *adopts* the
+# existing Helm release). Override to a clean flavor with no OSAC baked in
+# (e.g. "sno-4-22", the same base flavor "caas" is itself built from -- see
+# osac-project's internal snapshot-build tooling) together with
+# install_mode: snapshot-fresh to restore a bare cluster and run a real
+# install-operators/install-prereqs/install-osac sequence against it instead
+# (see deploy-ocp-snapshot-fresh in the Makefile).
+snapshot_flavor_name: "caas"
+snapshot_flavor_image: "quay.io/osac-project/cluster-flavors:{{ snapshot_flavor_name }}"
+snapshot_flavor_dir: "/var/cache/netris-lab/cluster-flavors/{{ snapshot_flavor_name }}"
 snapshot_recert_image: "quay.io/osac-project/recert:latest"
 snapshot_osac_namespace: "osac-e2e-ci"
 snapshot_osac_values_file: "values/caas-ci/values.yaml"

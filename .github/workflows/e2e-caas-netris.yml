@@ -89,6 +89,16 @@ on:
         required: false
         type: string
         default: ""
+      flavor-name:
+        description: "cluster-tool snapshot flavor tag to restore -- empty means the golden 'caas' flavor (OCP+OSAC/AAP already installed). Override to a clean flavor with no OSAC baked in (e.g. 'sno-4-22') together with install-mode: snapshot-fresh. Consumed by infra/netris/inventory/group_vars/all.yml's snapshot_flavor_name."
+        required: false
+        type: string
+        default: ""
+      install-mode:
+        description: "How make deploy-osac installs OSAC after restoring the snapshot: 'snapshot-adopt' (default -- golden snapshot already has OSAC, adopts the existing Helm release) or 'snapshot-fresh' (clean snapshot, real install-operators/install-prereqs/install-osac against it)."
+        required: false
+        type: string
+        default: ""
     outputs:
       result:
         description: "Overall result: PASSED or FAILED"
@@ -246,18 +256,27 @@ jobs:
           OSAC_AAP_BRANCH: ${{ inputs.osac-aap-branch }}
           OSAC_INSTALLER_REPO: ${{ inputs.osac-installer-repo }}
           OSAC_INSTALLER_BRANCH: ${{ inputs.osac-installer-branch }}
+          FLAVOR_NAME: ${{ inputs.flavor-name }}
+          INSTALL_MODE: ${{ inputs.install-mode }}
         run: |
           # Branch/tag/commit-ish inputs are validated with git's own ref-name
           # rules (git check-ref-format), not the shared character whitelist --
           # the whitelist allows colons, which git considers invalid in branch
           # names and are unsafe once these values reach real git operations.
-          for name in OSAC_INSTALLER_IMAGE OSAC_OPERATOR_IMAGE FULFILLMENT_SERVICE_IMAGE OSAC_AAP_EE_IMAGE OSAC_AAP_REPO OSAC_INSTALLER_REPO; do
+          for name in OSAC_INSTALLER_IMAGE OSAC_OPERATOR_IMAGE FULFILLMENT_SERVICE_IMAGE OSAC_AAP_EE_IMAGE OSAC_AAP_REPO OSAC_INSTALLER_REPO FLAVOR_NAME; do
             value="${!name}"
             if [[ -n "$value" ]] && [[ ! "$value" =~ ^[A-Za-z0-9._/:@-]+$ ]]; then
               echo "::error::${name} contains characters outside a valid reference (letters, digits, and ._/:@- only): ${value}"
               exit 1
             fi
           done
+          # INSTALL_MODE picks a Makefile target chain (see contract.mk's
+          # deploy-osac) -- a fixed allow-list, not a pattern, since it's
+          # only ever one of two literal values.
+          if [[ -n "$INSTALL_MODE" ]] && [[ "$INSTALL_MODE" != "snapshot-adopt" ]] && [[ "$INSTALL_MODE" != "snapshot-fresh" ]]; then
+            echo "::error::install-mode must be empty, 'snapshot-adopt', or 'snapshot-fresh': ${INSTALL_MODE}"
+            exit 1
+          fi
           for name in FULFILLMENT_SERVICE_BRANCH OSAC_AAP_BRANCH OSAC_INSTALLER_BRANCH; do
             value="${!name}"
             if [[ -n "$value" ]]; then
@@ -313,6 +332,7 @@ jobs:
           OSAC_AAP_BRANCH: ${{ inputs.osac-aap-branch }}
           OSAC_INSTALLER_REPO: ${{ inputs.osac-installer-repo }}
           OSAC_INSTALLER_BRANCH: ${{ inputs.osac-installer-branch }}
+          FLAVOR_NAME: ${{ inputs.flavor-name }}
         run: |
           if ! command -v jq >/dev/null 2>&1; then
             sudo dnf install -y jq
@@ -327,6 +347,7 @@ jobs:
             [osac_aap_branch]="$OSAC_AAP_BRANCH"
             [osac_installer_repo]="$OSAC_INSTALLER_REPO"
             [osac_installer_branch]="$OSAC_INSTALLER_BRANCH"
+            [snapshot_flavor_name]="$FLAVOR_NAME"
           )
           for key in "${!OVERRIDES[@]}"; do
             value="${OVERRIDES[$key]}"
@@ -391,7 +412,8 @@ jobs:
         shell: bash
         env:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
-        run: make deploy-osac INFRA=netris SUITE=caas EXTRA_VARS="${EXTRA_VARS}"
+          INSTALL_MODE: ${{ inputs.install-mode }}
+        run: make deploy-osac INFRA=netris SUITE=caas EXTRA_VARS="${EXTRA_VARS}" INSTALL_MODE="${INSTALL_MODE}"
 
       - name: Setup CaaS suite (make setup-suite)
         shell: bash

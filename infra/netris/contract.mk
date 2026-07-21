@@ -18,8 +18,19 @@ deploy-infra:
 
 # --- Deploy: OCP + OSAC from snapshot ---
 
+# INSTALL_MODE is a plain make var (like OSAC_NAMESPACE below), not an
+# ansible extra-var -- it only picks which Makefile chain this target
+# invokes, nothing in ansible reads it. "snapshot-adopt" (default): golden
+# snapshot already has OSAC, refresh-after-snapshot.py adopts the existing
+# Helm release. "snapshot-fresh": clean snapshot (e.g. snapshot_flavor_name
+# overridden to sno-4-22 via EXTRA_VARS), real
+# install-operators/install-prereqs/install-osac against it.
 deploy-osac:
+ifeq ($(or $(INSTALL_MODE),snapshot-adopt),snapshot-fresh)
+	$(MAKE) -f Makefile deploy-ocp-snapshot-fresh EXTRA_VARS='$(EXTRA_VARS)'
+else
 	$(MAKE) -f Makefile deploy-ocp-snapshot EXTRA_VARS='$(EXTRA_VARS)'
+endif
 	@printf '%s\n' \
 		'KUBECONFIG=/root/.kube/config' \
 		'OSAC_NAMESPACE=$(or $(OSAC_NAMESPACE),osac-e2e-ci)' \
