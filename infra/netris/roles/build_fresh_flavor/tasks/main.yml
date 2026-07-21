@@ -21,6 +21,83 @@
     name: git
     state: present
 
+# cluster-tool boot's "Configuring access" step shells out to
+# `cat /etc/haproxy/haproxy.cfg` and rewrites it to add per-clone
+# frontends/backends -- it doesn't create the base file itself (that's
+# machine-init.sh's/cluster-tool's own full server-provisioning job, which
+# this Netris-focused box was never bootstrapped with). Write cluster-tool's
+# own documented base config verbatim (matching its HAPROXY_BASE_CONFIG
+# constant) so boot's rewrite has something valid to parse.
+- name: Ensure haproxy is installed
+  ansible.builtin.package:
+    name: haproxy
+    state: present
+
+- name: Check for existing haproxy config
+  ansible.builtin.stat:
+    path: /etc/haproxy/haproxy.cfg
+  register: _haproxy_cfg
+
+- name: Write cluster-tool's base haproxy config
+  ansible.builtin.copy:
+    dest: /etc/haproxy/haproxy.cfg
+    mode: "0644"
+    content: |
+      global
+          log         127.0.0.1 local2
+          chroot      /var/lib/haproxy
+          pidfile     /var/run/haproxy.pid
+          maxconn     4000
+          user        haproxy
+          group       haproxy
+          daemon
+          stats socket /var/lib/haproxy/stats
+
+      defaults
+          mode                    tcp
+          log                     global
+          option                  tcplog
+          option                  dontlognull
+          retries                 3
+          timeout connect         10s
+          timeout client          1m
+          timeout server          1m
+          maxconn                 3000
+
+      frontend api
+          bind *:6443
+          tcp-request inspect-delay 5s
+          tcp-request content accept if { req_ssl_hello_type 1 }
+          default_backend api-fallback
+
+      backend api-fallback
+          server fallback 127.0.0.1:1 check
+
+      frontend ingress-https
+          bind *:443
+          tcp-request inspect-delay 5s
+          tcp-request content accept if { req_ssl_hello_type 1 }
+          default_backend ingress-https-fallback
+
+      backend ingress-https-fallback
+          server fallback 127.0.0.1:1 check
+
+      frontend ingress-http
+          bind *:80
+          mode http
+          default_backend ingress-http-fallback
+
+      backend ingress-http-fallback
+          mode http
+          server fallback 127.0.0.1:1 check
+  when: not _haproxy_cfg.stat.exists
+
+- name: Ensure haproxy is enabled and running
+  ansible.builtin.systemd:
+    name: haproxy
+    state: started
+    enabled: true
+
 - name: Check if cluster-tool binary is installed
   ansible.builtin.stat:
     path: "{{ cluster_tool_bin }}"
