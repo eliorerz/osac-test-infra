@@ -119,28 +119,6 @@
     remote_src: true
   when: not _ct_bin.stat.exists
 
-# cluster-tool boot's own steps talk to the VM directly by IP over SSH, so
-# boot itself succeeds without this -- but the kubeconfig it writes
-# references the cluster by its "api.test-infra-cluster-<id>.redhat.com"
-# hostname (like any real OCP kubeconfig), which only resolves for clients
-# on that clone's own per-network libvirt dnsmasq. `cluster-tool setup
-# client` is what makes the *host* (where oc/ansible actually run
-# afterward) able to resolve it too: installs dnsmasq, points
-# NetworkManager's dns= at it (so it can pick up libvirt's per-network
-# forwarders), and restarts NetworkManager to apply it. Confirmed live:
-# without this, `oc wait` fails immediately with a DNS lookup error, not a
-# timeout. Guarded on its own marker file so the (network-manager-restarting)
-# setup only runs once.
-- name: Check if cluster-tool client DNS setup already ran
-  ansible.builtin.stat:
-    path: /etc/NetworkManager/conf.d/cluster-tool-dns.conf
-  register: _ct_dns_configured
-
-- name: Run cluster-tool client DNS setup
-  ansible.builtin.command:
-    cmd: "{{ cluster_tool_bin }} setup client"
-  when: not _ct_dns_configured.stat.exists
-
 - name: Ensure cluster-tool config directory exists
   ansible.builtin.file:
     path: /root/.config/cluster-tool
@@ -222,6 +200,34 @@
     path: "/root/.kube/{{ _ct_clone_id }}.kubeconfig"
   register: _clone_kubeconfig_stat
   failed_when: not _clone_kubeconfig_stat.stat.exists
+
+# cluster-tool boot's own steps talk to the VM directly by IP over SSH, so
+# boot itself succeeds without this -- but the kubeconfig it writes
+# references the cluster by its "api.test-infra-cluster-<id>.redhat.com"
+# hostname (like any real OCP kubeconfig), which only resolves for clients
+# on that clone's own per-network libvirt dnsmasq, not the host running oc
+# afterward. A single /etc/hosts entry for just this one hostname is all
+# that's needed -- narrower and easily reversible, unlike reconfiguring
+# NetworkManager/dnsmasq host-wide (cluster-tool's own `setup client`
+# command, meant for boxes that need this permanently across many
+# concurrent clones/runners, not a one-clone-at-a-time build step like
+# this). VM_IP_SUFFIX (10) matches cluster-tool's own hardcoded constant.
+- name: Read cluster-tool state for this clone's subnet
+  ansible.builtin.slurp:
+    src: /root/.config/cluster-tool/state.json
+  register: _ct_state_raw
+
+- name: Set clone VM IP fact
+  ansible.builtin.set_fact:
+    _clone_vm_ip: "192.168.{{ (_ct_state_raw.content | b64decode | from_json).clones[_ct_clone_id].subnet_primary }}.10"
+
+- name: Resolve this clone's API hostname to its VM IP
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    block: "{{ _clone_vm_ip }} api.test-infra-cluster-{{ _ct_clone_id }}.redhat.com"
+    marker: "# {mark} build_fresh_flavor: {{ _ct_clone_id }}"
+    create: true
+    mode: "0644"
 
 # --- Clone osac-installer + build osac CLI + values-prep ---
 # Identical to roles/osac_refresh's own clone/build/values-prep tasks
@@ -532,6 +538,13 @@
     cmd: "{{ cluster_tool_bin }} destroy {{ _ct_clone_id }}"
   failed_when: false
   changed_when: true
+
+- name: Remove this clone's /etc/hosts entry
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    block: "{{ _clone_vm_ip }} api.test-infra-cluster-{{ _ct_clone_id }}.redhat.com"
+    marker: "# {mark} build_fresh_flavor: {{ _ct_clone_id }}"
+    state: absent
 
 - name: Clean up cluster-tool's own copy of the flavor (already copied above)
   ansible.builtin.command:
