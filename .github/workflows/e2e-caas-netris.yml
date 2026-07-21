@@ -89,13 +89,8 @@ on:
         required: false
         type: string
         default: ""
-      flavor-name:
-        description: "cluster-tool snapshot flavor tag to restore -- empty means the golden 'caas' flavor (OCP+OSAC/AAP already installed). Override to a clean flavor with no OSAC baked in (e.g. 'sno-4-22') together with install-mode: snapshot-fresh. Consumed by infra/netris/inventory/group_vars/all.yml's snapshot_flavor_name."
-        required: false
-        type: string
-        default: ""
       install-mode:
-        description: "How make deploy-osac installs OSAC after restoring the snapshot: 'snapshot-adopt' (default -- golden snapshot already has OSAC, adopts the existing Helm release) or 'snapshot-fresh' (clean snapshot, real install-operators/install-prereqs/install-osac against it)."
+        description: "How make deploy-osac provisions OSAC: 'snapshot-adopt' (default -- restores the golden 'caas' snapshot, which already has OSAC/AAP installed, and adopts its existing Helm release) or 'snapshot-fresh' (boots a clean base flavor via cluster-tool on plain libvirt with real internet, runs a real install-operators/install-prereqs/install-osac sequence against it, snapshots the result, then restores that into Netris the same way the golden snapshot is restored -- always-fresh content instead of a rarely-rebuilt image, at the cost of a longer run)."
         required: false
         type: string
         default: ""
@@ -256,14 +251,13 @@ jobs:
           OSAC_AAP_BRANCH: ${{ inputs.osac-aap-branch }}
           OSAC_INSTALLER_REPO: ${{ inputs.osac-installer-repo }}
           OSAC_INSTALLER_BRANCH: ${{ inputs.osac-installer-branch }}
-          FLAVOR_NAME: ${{ inputs.flavor-name }}
           INSTALL_MODE: ${{ inputs.install-mode }}
         run: |
           # Branch/tag/commit-ish inputs are validated with git's own ref-name
           # rules (git check-ref-format), not the shared character whitelist --
           # the whitelist allows colons, which git considers invalid in branch
           # names and are unsafe once these values reach real git operations.
-          for name in OSAC_INSTALLER_IMAGE OSAC_OPERATOR_IMAGE FULFILLMENT_SERVICE_IMAGE OSAC_AAP_EE_IMAGE OSAC_AAP_REPO OSAC_INSTALLER_REPO FLAVOR_NAME; do
+          for name in OSAC_INSTALLER_IMAGE OSAC_OPERATOR_IMAGE FULFILLMENT_SERVICE_IMAGE OSAC_AAP_EE_IMAGE OSAC_AAP_REPO OSAC_INSTALLER_REPO; do
             value="${!name}"
             if [[ -n "$value" ]] && [[ ! "$value" =~ ^[A-Za-z0-9._/:@-]+$ ]]; then
               echo "::error::${name} contains characters outside a valid reference (letters, digits, and ._/:@- only): ${value}"
@@ -332,7 +326,6 @@ jobs:
           OSAC_AAP_BRANCH: ${{ inputs.osac-aap-branch }}
           OSAC_INSTALLER_REPO: ${{ inputs.osac-installer-repo }}
           OSAC_INSTALLER_BRANCH: ${{ inputs.osac-installer-branch }}
-          FLAVOR_NAME: ${{ inputs.flavor-name }}
         run: |
           if ! command -v jq >/dev/null 2>&1; then
             sudo dnf install -y jq
@@ -347,7 +340,6 @@ jobs:
             [osac_aap_branch]="$OSAC_AAP_BRANCH"
             [osac_installer_repo]="$OSAC_INSTALLER_REPO"
             [osac_installer_branch]="$OSAC_INSTALLER_BRANCH"
-            [snapshot_flavor_name]="$FLAVOR_NAME"
           )
           for key in "${!OVERRIDES[@]}"; do
             value="${OVERRIDES[$key]}"

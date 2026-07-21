@@ -65,16 +65,8 @@ on:
         description: "Branch, tag, or commit of osac-installer to clone -- empty means main."
         required: false
         default: ""
-      flavor-name:
-        description: "cluster-tool snapshot flavor to restore -- 'caas' (default) is the golden snapshot with OSAC/AAP already installed. 'sno-4-22' is a clean snapshot with no OSAC baked in; pair it with install-mode: snapshot-fresh."
-        required: false
-        type: choice
-        options:
-          - "caas"
-          - "sno-4-22"
-        default: "caas"
       install-mode:
-        description: "How make deploy-osac installs OSAC after restoring the snapshot -- snapshot-adopt (default) adopts the golden snapshot's existing Helm release; snapshot-fresh runs a real install-operators/install-prereqs/install-osac sequence (use with flavor-name: sno-4-22)."
+        description: "How make deploy-osac provisions OSAC -- snapshot-adopt (default) restores the golden 'caas' snapshot (OSAC/AAP already installed) and adopts its existing Helm release; snapshot-fresh boots a clean base flavor via cluster-tool on plain libvirt with real internet, installs OSAC for real, snapshots the result, then restores that into Netris the same way -- always-fresh content, longer run."
         required: false
         type: choice
         options:
@@ -102,5 +94,4 @@ jobs:
       osac-aap-branch: ${{ inputs.osac-aap-branch || '' }}
       osac-installer-repo: ${{ inputs.osac-installer-repo || '' }}
       osac-installer-branch: ${{ inputs.osac-installer-branch || '' }}
-      flavor-name: ${{ inputs.flavor-name || 'caas' }}
       install-mode: ${{ inputs.install-mode || 'snapshot-adopt' }}

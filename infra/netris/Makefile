@@ -1,7 +1,7 @@
 .PHONY: deploy deploy-fast setup deploy-lab deploy-ocp deploy-ocp-snapshot deploy-osac \
        restore-ocp-snapshot snapshot-refresh prep-snapshot-refresh \
        run-snapshot-refresh post-snapshot-refresh \
-       deploy-ocp-snapshot-fresh install-osac-fresh \
+       deploy-ocp-snapshot-fresh \
        setup-caas deploy-caas \
        deploy-vmaas deploy-bmaas \
        destroy destroy-osac destroy-ocp destroy-caas destroy-vmaas destroy-bmaas \
@@ -11,6 +11,7 @@
 
 EXTRA_VARS ?=
 ANSIBLE_EXTRA = $(if $(EXTRA_VARS),-e '$(EXTRA_VARS)')
+FRESH_FLAVOR_NAME ?= caas-fresh
 
 # Full shared pipeline
 deploy: deploy-lab deploy-ocp deploy-osac
@@ -84,18 +85,33 @@ run-snapshot-refresh:
 post-snapshot-refresh:
 	ansible-playbook playbooks/post-snapshot-refresh.yml $(ANSIBLE_EXTRA)
 
-# Snapshot-based deployment onto a *clean* flavor (no OSAC baked in) --
-# restores the same way deploy-ocp-snapshot does, then runs a real
-# install-operators/install-prereqs/install-osac sequence instead of
-# adopting an existing Helm release. Selected via install_mode:
-# snapshot-fresh (see contract.mk's deploy-osac). Reuses post-osac (MCE
-# OS_IMAGES filtering) and post-snapshot-refresh (Netris wiring: SSH keys,
-# socat forwarder, cluster-fulfillment-ig) unchanged -- both are already
-# generic across adopt/fresh, only the install step itself differs.
-deploy-ocp-snapshot-fresh: restore-ocp-snapshot install-osac-fresh post-osac post-snapshot-refresh
-
-install-osac-fresh:
-	ansible-playbook playbooks/install-osac-fresh.yml $(ANSIBLE_EXTRA)
+# Snapshot-based deployment onto a *freshly built* flavor, instead of a
+# rarely-rebuilt static golden image -- build-fresh-flavor boots
+# cluster_tool_base_flavor on plain libvirt (real internet, no Netris
+# networking yet, same mechanism e2e-vmaas-full-install.yml/
+# e2e-bmaas-full-install.yml already use), runs a real
+# install-operators/install-prereqs/install-osac sequence against it, then
+# snapshots the result locally, in the exact same disk+crypto layout a
+# registry-pulled snapshot would have. restore-ocp-snapshot then runs
+# completely unchanged -- the same recert/identity-transplant that already
+# restores the golden "caas" snapshot, just fed something built moments ago
+# instead of a stale registry image. Reuses post-osac (MCE OS_IMAGES
+# filtering) and post-snapshot-refresh (Netris wiring: SSH keys, socat
+# forwarder, cluster-fulfillment-ig) unchanged -- both are already generic
+# across adopt/fresh. Selected via install_mode: snapshot-fresh (see
+# contract.mk's deploy-osac).
+#
+# An explicit recipe (not prerequisites) because build-fresh-flavor and
+# restore-ocp-snapshot both need to agree on the same non-default
+# snapshot_flavor_name -- FRESH_FLAVOR_NAME must differ from the golden
+# "caas" name so this never collides with (or overwrites) a real
+# golden-snapshot cache that might already be present on a persistent
+# (non-ephemeral) box.
+deploy-ocp-snapshot-fresh:
+	ansible-playbook playbooks/build-fresh-flavor.yml $(ANSIBLE_EXTRA) -e snapshot_flavor_name=$(FRESH_FLAVOR_NAME)
+	ansible-playbook playbooks/restore-ocp-snapshot.yml $(ANSIBLE_EXTRA) -e snapshot_flavor_name=$(FRESH_FLAVOR_NAME)
+	ansible-playbook playbooks/post-osac.yml $(ANSIBLE_EXTRA)
+	ansible-playbook playbooks/post-snapshot-refresh.yml $(ANSIBLE_EXTRA)
 
 # Destroy targets
 destroy:

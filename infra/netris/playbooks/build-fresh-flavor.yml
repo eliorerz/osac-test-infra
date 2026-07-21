@@ -1,0 +1,6 @@
+---
+- name: Build a fresh OSAC flavor via cluster-tool (plain network, real internet)
+  hosts: all
+  gather_facts: false
+  roles:
+    - build_fresh_flavor

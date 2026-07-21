@@ -67,20 +67,38 @@ osac_aap_branch: ""
 osac_aap_image: ""
 
 # Snapshot-based deployment (fast path)
-# snapshot_flavor_name defaults to the golden CaaS flavor (OCP+OSAC/AAP
-# already installed -- restore-ocp-snapshot + snapshot-refresh *adopts* the
-# existing Helm release). Override to a clean flavor with no OSAC baked in
-# (e.g. "sno-4-22", the same base flavor "caas" is itself built from -- see
-# osac-project's internal snapshot-build tooling) together with
-# install_mode: snapshot-fresh to restore a bare cluster and run a real
-# install-operators/install-prereqs/install-osac sequence against it instead
-# (see deploy-ocp-snapshot-fresh in the Makefile).
+# snapshot_flavor_name/snapshot_flavor_dir are shared by both deploy-osac
+# branches (see contract.mk's INSTALL_MODE):
+#   snapshot-adopt (default): restore-ocp-snapshot pulls the golden "caas"
+#     OCI image (OCP+OSAC/AAP already installed), snapshot-refresh adopts
+#     its existing Helm release.
+#   snapshot-fresh: the Makefile overrides snapshot_flavor_name to a
+#     distinct name (FRESH_FLAVOR_NAME, default "caas-fresh") -- see
+#     roles/build_fresh_flavor, which populates snapshot_flavor_dir itself
+#     (boots cluster_tool_base_flavor on plain libvirt with real internet,
+#     runs a real OSAC install, snapshots it locally) instead of pulling
+#     snapshot_flavor_image from a registry. restore-ocp-snapshot then runs
+#     completely unchanged against that freshly-built flavor.
 snapshot_flavor_name: "caas"
 snapshot_flavor_image: "quay.io/osac-project/cluster-flavors:{{ snapshot_flavor_name }}"
 snapshot_flavor_dir: "/var/cache/netris-lab/cluster-flavors/{{ snapshot_flavor_name }}"
 snapshot_recert_image: "quay.io/osac-project/recert:latest"
 snapshot_osac_namespace: "osac-e2e-ci"
 snapshot_osac_values_file: "values/caas-ci/values.yaml"
+
+# cluster-tool (github.com/osac-project/cluster-tool) -- used only by
+# roles/build_fresh_flavor (install_mode: snapshot-fresh) to boot a clean
+# base flavor on plain libvirt (real internet, no Netris SDN involved) and
+# install OSAC onto it for real, before restore-ocp-snapshot transplants
+# the result into Netris's network. cluster_tool_base_flavor is the same
+# flavor e2e-vmaas-full-install.yml/e2e-bmaas-full-install.yml already boot
+# successfully for their own fresh installs.
+cluster_tool_repo: "https://github.com/osac-project/cluster-tool.git"
+cluster_tool_dir: "/opt/cluster-tool"
+cluster_tool_bin: "/usr/local/bin/cluster-tool"
+cluster_tool_data_path: "/var/lib/cluster-tool"
+cluster_tool_base_flavor: "sno-4-22"
+cluster_tool_base_flavor_image: "quay.io/osac-project/cluster-flavors:{{ cluster_tool_base_flavor }}"
 
 # AWS configuration for Route 53 DNS (read from config file or environment)
 aws_access_key_id: "{{ lookup('ini', 'aws_access_key_id section=default file=' + config_path, errors='ignore') | default(lookup('env', 'AWS_ACCESS_KEY_ID'), true) }}"

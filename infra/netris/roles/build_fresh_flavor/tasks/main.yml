@@ -1,0 +1,445 @@
+---
+# Builds a fresh OSAC flavor the same way the golden "caas" flavor itself is
+# built (boot a clean base flavor, install for real, snapshot the result) --
+# except this runs on-demand, in this CI run, instead of being a rarely
+# rebuilt static image. Runs entirely via cluster-tool's own plain libvirt
+# NAT network (real internet, no Netris SDN involved) -- restore-ocp-snapshot
+# (run right after this, unchanged) then does the *same* identity-transplant
+# it already does for the golden snapshot, moving this fresh install into
+# Netris's network. Mirrors .github/workflows/e2e-vmaas-full-install.yml's
+# install-operators/install-prereqs/install-osac sequence for the actual
+# install; the boot/snapshot mechanics mirror osac-project/cluster-tool's own
+# snapshot-build tooling (create_snapshot()/scale_to_zero()).
+
+- name: Set fresh-build facts
+  ansible.builtin.set_fact:
+    _ct_clone_id: "{{ snapshot_flavor_name }}-src"
+    _clone_kubeconfig: "/root/.kube/{{ snapshot_flavor_name }}-src.kubeconfig"
+
+- name: Ensure git is available
+  ansible.builtin.package:
+    name: git
+    state: present
+
+- name: Check if cluster-tool binary is installed
+  ansible.builtin.stat:
+    path: "{{ cluster_tool_bin }}"
+  register: _ct_bin
+
+- name: Clone cluster-tool
+  ansible.builtin.git:
+    repo: "{{ cluster_tool_repo }}"
+    dest: "{{ cluster_tool_dir }}"
+    version: main
+    force: true
+  when: not _ct_bin.stat.exists
+
+- name: Install cluster-tool binary
+  ansible.builtin.copy:
+    src: "{{ cluster_tool_dir }}/cluster-tool"
+    dest: "{{ cluster_tool_bin }}"
+    mode: "0755"
+    remote_src: true
+  when: not _ct_bin.stat.exists
+
+- name: Ensure cluster-tool config directory exists
+  ansible.builtin.file:
+    path: /root/.config/cluster-tool
+    state: directory
+    mode: "0755"
+
+- name: Check if cluster-tool is already configured
+  ansible.builtin.stat:
+    path: /root/.config/cluster-tool/config
+  register: _ct_config
+
+- name: Write cluster-tool data-path config
+  ansible.builtin.copy:
+    dest: /root/.config/cluster-tool/config
+    content: "CLUSTER_TOOL_DATA={{ cluster_tool_data_path }}\n"
+    mode: "0644"
+  when: not _ct_config.stat.exists
+
+- name: Create cluster-tool data directories
+  ansible.builtin.file:
+    path: "{{ cluster_tool_data_path }}/{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - flavors
+    - overlays
+    - tmp
+    - containers/storage
+
+- name: Generate cluster-tool SSH keypair
+  ansible.builtin.command:
+    cmd: ssh-keygen -t ed25519 -f /root/.config/cluster-tool/cluster-tool.key -N '' -q
+    creates: /root/.config/cluster-tool/cluster-tool.key
+
+- name: Register cluster-tool local server
+  ansible.builtin.copy:
+    dest: /root/.config/cluster-tool/servers.json
+    content: '{"servers": {"local": {"host": "local"}}, "default": "local"}'
+    mode: "0644"
+  register: _ct_servers
+  changed_when: _ct_servers.changed and not _ct_config.stat.exists
+
+- name: Check if base flavor is already pulled
+  ansible.builtin.command:
+    cmd: "{{ cluster_tool_bin }} flavors"
+  register: _ct_flavors
+  changed_when: false
+
+- name: Pull base flavor
+  ansible.builtin.command:
+    cmd: "{{ cluster_tool_bin }} pull {{ cluster_tool_base_flavor_image }} --name {{ cluster_tool_base_flavor }}"
+  register: _ct_pull
+  until: _ct_pull.rc == 0
+  retries: 5
+  delay: 30
+  when: "cluster_tool_base_flavor not in _ct_flavors.stdout"
+
+- name: Clean up any stale clone from a previous attempt
+  ansible.builtin.command:
+    cmd: "{{ cluster_tool_bin }} destroy {{ _ct_clone_id }}"
+  failed_when: false
+  changed_when: true
+
+- name: Boot base flavor clone
+  ansible.builtin.command:
+    cmd: >-
+      {{ cluster_tool_bin }} boot --flavor {{ cluster_tool_base_flavor }}
+      --name {{ _ct_clone_id }} --pull-secret {{ pull_secret_path }}
+  changed_when: true
+
+- name: Ensure local .kube directory exists
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    mode: "0700"
+
+- name: Verify clone kubeconfig is present
+  ansible.builtin.stat:
+    path: "/root/.kube/{{ _ct_clone_id }}.kubeconfig"
+  register: _clone_kubeconfig_stat
+  failed_when: not _clone_kubeconfig_stat.stat.exists
+
+# --- Clone osac-installer + build osac CLI + values-prep ---
+# Identical to roles/osac_refresh's own clone/build/values-prep tasks
+# (adopt-vs-fresh doesn't change any of this) -- see that role for the
+# rationale on each step.
+
+- name: Clone osac-installer
+  ansible.builtin.git:
+    repo: "{{ osac_installer_repo }}"
+    dest: "{{ osac_installer_dir }}"
+    version: "{{ osac_installer_branch }}"
+    force: true
+  when: not (osac_installer_skip_clone | default(false) | bool)
+
+- name: Initialize submodules
+  ansible.builtin.command:
+    cmd: git submodule update --init --recursive
+    chdir: "{{ osac_installer_dir }}"
+  register: _submodule_update
+  changed_when: _submodule_update.stdout | length > 0
+  when: not (osac_installer_skip_clone | default(false) | bool)
+
+- name: Override osac-operator code in installer
+  ansible.builtin.git:
+    repo: "{{ osac_operator_repo }}"
+    dest: "{{ osac_installer_dir }}/base/osac-operator"
+    version: "{{ osac_operator_branch }}"
+    force: true
+  when:
+    - not (osac_installer_skip_clone | default(false) | bool)
+    - osac_operator_branch | default('') | length > 0
+
+- name: Override fulfillment-service code in installer
+  ansible.builtin.git:
+    repo: "{{ fulfillment_service_repo }}"
+    dest: "{{ osac_installer_dir }}/base/osac-fulfillment-service"
+    version: "{{ fulfillment_service_branch }}"
+    force: true
+  when:
+    - not (osac_installer_skip_clone | default(false) | bool)
+    - fulfillment_service_branch | default('') | length > 0
+
+- name: Ensure non-root install directory exists
+  ansible.builtin.file:
+    path: "{{ lookup('env', 'HOME') }}/.local/bin"
+    state: directory
+    mode: "0755"
+  become: false
+  when: not (osac_installer_skip_clone | default(false) | bool)
+
+- name: Rebuild osac CLI from fulfillment-service
+  ansible.builtin.command:
+    cmd: /usr/local/go/bin/go build -o "{{ lookup('env', 'HOME') }}/.local/bin/osac" ./cmd/osac
+    chdir: "{{ osac_installer_dir }}/base/osac-fulfillment-service"
+  become: false
+  environment:
+    GOPATH: "{{ lookup('env', 'HOME') }}/go"
+    GOCACHE: "{{ lookup('env', 'HOME') }}/.cache/go-build"
+  when: not (osac_installer_skip_clone | default(false) | bool)
+
+- name: Determine values directory
+  ansible.builtin.set_fact:
+    _values_dir: "{{ snapshot_osac_values_file | dirname }}"
+
+- name: Ensure values directory exists
+  ansible.builtin.file:
+    path: "{{ osac_installer_dir }}/{{ _values_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Copy AAP license to values directory
+  ansible.builtin.copy:
+    src: "{{ osac_license_path }}"
+    dest: "{{ osac_installer_dir }}/{{ _values_dir }}/license.zip"
+    remote_src: true
+    mode: "0644"
+
+- name: Copy pull-secret to values directory
+  ansible.builtin.copy:
+    src: "{{ pull_secret_path }}"
+    dest: "{{ osac_installer_dir }}/{{ _values_dir }}/pull-secret.json"
+    remote_src: true
+    mode: "0644"
+
+- name: Override fulfillment-service image in values file
+  ansible.builtin.shell:
+    cmd: |
+      sed -i 's|[a-zA-Z0-9./_-]*fulfillment-service:[a-zA-Z0-9._-]*|{{ fulfillment_service_image }}|g' \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+  when: fulfillment_service_image | default('') | length > 0
+
+- name: Override osac-operator image in values file
+  ansible.builtin.shell:
+    cmd: |
+      REPO="{{ osac_operator_image | regex_replace(':[^/]+$', '') }}"
+      TAG="{{ osac_operator_image | regex_search(':[^/]+$') | regex_replace('^:', '') | default('latest', true) }}"
+      sed -i "s|[a-zA-Z0-9./_-]*osac-operator:[a-zA-Z0-9._-]*|{{ osac_operator_image }}|g" \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+      sed -i "/repository: .*osac-operator/{s|repository: .*|repository: ${REPO}|;n;s/tag: .*/tag: ${TAG}/}" \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+  when: osac_operator_image | default('') | length > 0
+
+- name: Override osac-aap image in values file
+  ansible.builtin.shell:
+    cmd: |
+      sed -i 's|[a-zA-Z0-9./_-]*osac-aap:[a-zA-Z0-9._-]*|{{ osac_aap_image }}|g' \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+  when: osac_aap_image | default('') | length > 0
+
+- name: Override AAP project git URI in values file
+  ansible.builtin.shell:
+    cmd: |
+      sed -i 's|projectGitUri: .*|projectGitUri: "{{ osac_aap_repo }}"|' \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+  # Unconditional -- see the identical note in roles/osac_refresh.
+
+- name: Override AAP project git branch in values file
+  ansible.builtin.shell:
+    cmd: |
+      sed -i 's|projectGitBranch: .*|projectGitBranch: "{{ osac_aap_branch }}"|' \
+        {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+  when: osac_aap_branch | default('') | length > 0
+
+- name: Disable osac-ui (image not published yet)
+  ansible.builtin.shell:
+    cmd: |
+      if grep -q 'osac-ui' {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}; then
+        sed -i '/^ui:/,/^[a-z]/{s/enabled: true/enabled: false/}' \
+          {{ osac_installer_dir }}/{{ snapshot_osac_values_file }}
+      fi
+  changed_when: false
+
+# --- Real install, on the plain-network clone (real internet -- this is
+# the whole point) ---
+
+- name: Wait for CatalogSource redhat-operators to be READY
+  ansible.builtin.command:
+    cmd: >-
+      oc wait --for=jsonpath={.status.connectionState.lastObservedState}=READY
+      catalogsource/redhat-operators -n openshift-marketplace --timeout=300s
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: false
+
+- name: Install OLM operators (make install-operators)
+  ansible.builtin.command:
+    cmd: make install-operators VALUES_FILE={{ snapshot_osac_values_file }}
+    chdir: "{{ osac_installer_dir }}"
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: true
+
+- name: Configure prerequisites (make install-prereqs)
+  ansible.builtin.command:
+    cmd: make install-prereqs VALUES_FILE={{ snapshot_osac_values_file }}
+    chdir: "{{ osac_installer_dir }}"
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: true
+
+- name: Deploy OSAC via Helm (make install-osac)
+  ansible.builtin.command:
+    cmd: make install-osac VALUES_FILE={{ snapshot_osac_values_file }}
+    chdir: "{{ osac_installer_dir }}"
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: true
+
+- name: Create CI test tenants
+  ansible.builtin.shell:
+    cmd: |
+      oc apply -f - <<EOF
+      apiVersion: osac.openshift.io/v1alpha1
+      kind: Tenant
+      metadata:
+        name: {{ item }}
+        namespace: {{ snapshot_osac_namespace }}
+      spec: {}
+      EOF
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  loop:
+    - "{{ snapshot_osac_namespace }}"
+    - shared
+  changed_when: true
+
+- name: Disable EDA in AAP platform CR (OSAC-1624 removed EDA)
+  ansible.builtin.shell:
+    cmd: |
+      if oc get ansibleautomationplatform osac-aap -n {{ snapshot_osac_namespace }} >/dev/null 2>&1; then
+        oc patch ansibleautomationplatform osac-aap -n {{ snapshot_osac_namespace }} \
+          --type merge -p '{"spec":{"eda":{"disabled":true}}}'
+      fi
+      oc delete eda osac-aap-eda -n {{ snapshot_osac_namespace }} --ignore-not-found
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: false
+
+# --- Quiesce before snapshotting (mirrors cluster-tool's own
+# snapshot-build tooling's scale_to_zero(): scaling everything down first
+# means restore-ocp-snapshot's existing "scale suspended operators back
+# up" logic finds what it expects -- the same starting state the golden
+# caas snapshot is built with.) ---
+
+- name: Find AAP CSV name
+  ansible.builtin.shell:
+    cmd: |
+      oc get csv -n ansible-aap -o json | python3 -c "
+      import json, sys
+      data = json.load(sys.stdin)
+      for item in data['items']:
+          if item.get('status', {}).get('phase') != 'Succeeded':
+              continue
+          deploys = item.get('spec', {}).get('install', {}).get('spec', {}).get('deployments', [])
+          if any(d.get('name') == 'automation-controller-operator-controller-manager' for d in deploys):
+              print(item['metadata']['name'])
+              break
+      "
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  register: _aap_csv
+  changed_when: false
+  failed_when: _aap_csv.stdout | trim | length == 0
+
+- name: Scale AAP operators to 0 via CSV
+  ansible.builtin.shell:
+    cmd: |
+      DEPLOYS=$(oc get csv {{ _aap_csv.stdout | trim }} -n ansible-aap -o jsonpath='{.spec.install.spec.deployments[*].name}')
+      PATCH="["
+      i=0
+      for d in $DEPLOYS; do
+        [ "$i" -gt 0 ] && PATCH="$PATCH,"
+        PATCH="$PATCH{\"op\":\"replace\",\"path\":\"/spec/install/spec/deployments/$i/spec/replicas\",\"value\":0}"
+        i=$((i + 1))
+      done
+      PATCH="$PATCH]"
+      oc patch csv {{ _aap_csv.stdout | trim }} -n ansible-aap --type=json -p "$PATCH"
+      for d in $DEPLOYS; do
+        oc wait deploy/$d -n ansible-aap --for=jsonpath='{.spec.replicas}'=0 --timeout=60s
+      done
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: true
+
+- name: Scale all deployments in OSAC namespace to 0
+  ansible.builtin.command:
+    cmd: oc scale deploy --all -n {{ snapshot_osac_namespace }} --replicas=0
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: true
+
+- name: Scale all StatefulSets in OSAC namespace to 0
+  ansible.builtin.command:
+    cmd: oc scale statefulset --all -n {{ snapshot_osac_namespace }} --replicas=0
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: true
+
+- name: Delete postgres bare pod
+  ansible.builtin.command:
+    cmd: oc delete pod postgres -n {{ snapshot_osac_namespace }} --ignore-not-found --wait=true --timeout=60s
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: true
+
+- name: Delete Job pods
+  ansible.builtin.command:
+    cmd: oc delete pods -n {{ snapshot_osac_namespace }} -l job-name --ignore-not-found --wait=true --timeout=60s
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: true
+
+- name: Wait for all pods to terminate
+  ansible.builtin.command:
+    cmd: oc wait pod --all -n {{ snapshot_osac_namespace }} --for=delete --timeout=300s
+  environment:
+    KUBECONFIG: "{{ _clone_kubeconfig }}"
+  changed_when: false
+
+# --- Snapshot locally and hand off to restore-ocp-snapshot ---
+
+- name: Delete any stale flavor registration with the same name
+  ansible.builtin.command:
+    cmd: "{{ cluster_tool_bin }} flavors --delete {{ snapshot_flavor_name }}"
+  failed_when: false
+  changed_when: true
+
+- name: Snapshot the freshly-installed clone
+  ansible.builtin.command:
+    cmd: "{{ cluster_tool_bin }} snapshot --name {{ snapshot_flavor_name }} --source {{ _ct_clone_id }}"
+  changed_when: true
+
+- name: Ensure netris flavor cache directory exists
+  ansible.builtin.file:
+    path: "{{ snapshot_flavor_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Copy freshly-built flavor into netris's expected cache location
+  ansible.builtin.copy:
+    src: "{{ cluster_tool_data_path }}/flavors/{{ snapshot_flavor_name }}/"
+    dest: "{{ snapshot_flavor_dir }}/"
+    remote_src: true
+    mode: preserve
+
+- name: Clean up the source clone
+  ansible.builtin.command:
+    cmd: "{{ cluster_tool_bin }} destroy {{ _ct_clone_id }}"
+  failed_when: false
+  changed_when: true
+
+- name: Clean up cluster-tool's own copy of the flavor (already copied above)
+  ansible.builtin.command:
+    cmd: "{{ cluster_tool_bin }} flavors --delete {{ snapshot_flavor_name }}"
+  failed_when: false
+  changed_when: true
+
+- name: Report fresh flavor build completed
+  ansible.builtin.debug:
+    msg: "Fresh flavor '{{ snapshot_flavor_name }}' built and staged at {{ snapshot_flavor_dir }} -- ready for restore-ocp-snapshot"

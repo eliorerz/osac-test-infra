@@ -1,6 +1,0 @@
----
-- name: Install OSAC fresh on a clean-snapshot-restored OCP SNO
-  hosts: all
-  gather_facts: false
-  roles:
-    - osac_install_fresh
