@@ -29,7 +29,7 @@ on:
       tooling-check-cmds:
         description: "Semicolon-separated commands to verify on the box before JIT registration. Defaults to installing this flow's prerequisites: both cluster-tool's virtualization stack (libvirt/qemu-kvm/virt-install/podman/skopeo/zstd/pigz/jq/haproxy/git) and the Netris lab's ansible stack (ansible-core/python3-pip/make) -- override here to smoke-test against a stock AMI (e.g. 'true') or to check for something else, without editing the workflow file."
         required: false
-        default: "dnf install -y libvirt qemu-kvm virt-install podman skopeo zstd pigz jq haproxy git ansible-core python3-pip make; systemctl enable --now libvirtd; pip3 install ansible; command -v virt-install; command -v ansible-playbook; command -v make"
+        default: "dnf downgrade -y openssl-libs-3.5.5-4.el9_8 || true; dnf install -y libvirt qemu-kvm virt-install podman skopeo zstd pigz jq haproxy git ansible-core python3-pip make; systemctl enable --now libvirtd; pip3 install ansible; command -v virt-install; command -v ansible-playbook; command -v make"
       test-filter:
         description: "pytest -k filter expression (optional)"
         required: false
@@ -53,7 +53,7 @@ jobs:
     with:
       instance-type: ${{ inputs.instance-type || 'c5n.metal' }}
       aws-region: ${{ inputs.aws-region || 'us-east-1' }}
-      tooling-check-cmds: ${{ inputs.tooling-check-cmds || 'dnf install -y libvirt qemu-kvm virt-install podman skopeo zstd pigz jq haproxy git ansible-core python3-pip make; systemctl enable --now libvirtd; pip3 install ansible; command -v virt-install; command -v ansible-playbook; command -v make' }}
+      tooling-check-cmds: ${{ inputs.tooling-check-cmds || 'dnf downgrade -y openssl-libs-3.5.5-4.el9_8 || true; dnf install -y libvirt qemu-kvm virt-install podman skopeo zstd pigz jq haproxy git ansible-core python3-pip make; systemctl enable --now libvirtd; pip3 install ansible; command -v virt-install; command -v ansible-playbook; command -v make' }}
       test-filter: ${{ inputs.test-filter || '' }}
       image-overrides: ${{ inputs.image-overrides || '{}' }}
       installer-repo: ${{ inputs.installer-repo || '' }}
