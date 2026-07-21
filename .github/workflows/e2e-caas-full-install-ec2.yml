@@ -342,6 +342,20 @@ jobs:
           fi
           systemctl enable --now haproxy
 
+          echo "=== oc CLI ==="
+          # machine-init.sh's own "oc" step installs this on the shared
+          # osac-ci fleet -- this box skips that entirely, confirmed live
+          # ("oc: command not found" failing the first real dispatch).
+          if ! command -v oc &>/dev/null; then
+            TMP_OC=$(mktemp -d)
+            curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz" \
+              | tar xz -C "${TMP_OC}"
+            install -m 0755 "${TMP_OC}/oc" /usr/local/bin/oc
+            install -m 0755 "${TMP_OC}/kubectl" /usr/local/bin/kubectl 2>/dev/null || true
+            rm -rf "${TMP_OC}"
+          fi
+          oc version --client
+
           echo "=== agent VM storage ==="
           mkdir -p /data/osac-storage
 
