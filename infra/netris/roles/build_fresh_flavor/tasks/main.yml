@@ -378,6 +378,7 @@
     chdir: "{{ osac_installer_dir }}"
   environment:
     KUBECONFIG: "{{ _clone_kubeconfig }}"
+    INSTALLER_NAMESPACE: "{{ snapshot_osac_namespace }}"
   changed_when: true
 
 - name: Configure prerequisites (make install-prereqs)
@@ -386,6 +387,7 @@
     chdir: "{{ osac_installer_dir }}"
   environment:
     KUBECONFIG: "{{ _clone_kubeconfig }}"
+    INSTALLER_NAMESPACE: "{{ snapshot_osac_namespace }}"
   changed_when: true
 
 - name: Deploy OSAC via Helm (make install-osac)
@@ -394,6 +396,7 @@
     chdir: "{{ osac_installer_dir }}"
   environment:
     KUBECONFIG: "{{ _clone_kubeconfig }}"
+    INSTALLER_NAMESPACE: "{{ snapshot_osac_namespace }}"
   changed_when: true
 
 - name: Create CI test tenants
