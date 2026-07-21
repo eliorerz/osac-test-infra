@@ -496,18 +496,37 @@
     KUBECONFIG: "{{ _clone_kubeconfig }}"
   changed_when: true
 
-- name: Delete Job pods
-  ansible.builtin.command:
-    cmd: oc delete pods -n {{ snapshot_osac_namespace }} -l job-name --ignore-not-found --wait=true --timeout=60s
+# AAP's own scheduler (config-as-code sync, project sync, etc.) can fire a
+# new automation Job at any moment, including mid-quiesce -- confirmed live:
+# a one-shot "delete job pods" here missed a job that got created seconds
+# later, and the subsequent "wait for all pods to terminate" then hung on
+# it for the full 300s (it wasn't stuck, it just didn't exist yet when we
+# deleted). Delete the Job resources themselves (not just their pods --
+# otherwise the Job controller just recreates the pod) and retry the
+# delete+check cycle so any job spawned during this window gets caught on
+# a later pass instead of racing a single attempt.
+- name: Delete Jobs (retry to catch any spawned mid-quiesce)
+  ansible.builtin.shell:
+    cmd: |
+      oc delete jobs --all -n {{ snapshot_osac_namespace }} --ignore-not-found --wait=true --timeout=60s
+      oc get pods -n {{ snapshot_osac_namespace }} -l job-name --no-headers 2>/dev/null | wc -l
   environment:
     KUBECONFIG: "{{ _clone_kubeconfig }}"
+  register: _remaining_job_pods
+  until: _remaining_job_pods.stdout_lines[-1] | trim == '0'
+  retries: 10
+  delay: 15
   changed_when: true
 
 - name: Wait for all pods to terminate
   ansible.builtin.command:
-    cmd: oc wait pod --all -n {{ snapshot_osac_namespace }} --for=delete --timeout=300s
+    cmd: oc wait pod --all -n {{ snapshot_osac_namespace }} --for=delete --timeout=60s
   environment:
     KUBECONFIG: "{{ _clone_kubeconfig }}"
+  register: _pods_terminated
+  until: _pods_terminated.rc == 0
+  retries: 5
+  delay: 5
   changed_when: false
 
 # --- Snapshot locally and hand off to restore-ocp-snapshot ---
