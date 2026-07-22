@@ -6,3 +6,12 @@ sleep 3
 ip route del 192.168.122.0/24 via 255.255.255.0 dev tun0 2>/dev/null || true
 # Re-add virbr0 connected route in case VPN route deletion removed it
 ip route add 192.168.122.0/24 dev virbr0 proto kernel scope link src 192.168.122.1 2>/dev/null || true
+
+# Same conflict for br-mgmt (192.168.16.254/20): the VPN server also pushes
+# a route for 192.168.16.0/20 via tun0, shadowing br-mgmt's connected route.
+# Without this fix, replies from the host to anything on br-mgmt (mgmt-server,
+# discovery agent VMs) get routed into the VPN tunnel instead of back out
+# br-mgmt -- requests arrive fine over the bridge, but responses never make it
+# back, so nothing on 192.168.16.0/20 can complete a TCP handshake with the host.
+ip route del 192.168.16.0/20 via 255.255.255.0 dev tun0 2>/dev/null || true
+ip route add 192.168.16.0/20 dev br-mgmt proto kernel scope link src 192.168.16.254 2>/dev/null || true
