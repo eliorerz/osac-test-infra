@@ -532,7 +532,7 @@ jobs:
           flock --shared 9
           /usr/local/bin/cluster-tool boot \
             --flavor "${FLAVOR_NAME}" --name "${CLONE_NAME}" \
-            --pull-secret "$RUNNER_TEMP/pull-secret.json" 9>&-
+            --pull-secret /root/pull-secret 9>&-
           exec 9>&-
 
           echo "Cluster clone '${CLONE_NAME}' booted."
@@ -778,7 +778,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/test-output"
           podman run --rm --network=host \
             -v "$RUNNER_TEMP/kubeconfig":/root/.kube/config:ro,Z \
-            -v "$RUNNER_TEMP/pull-secret.json":/root/pull-secret:ro,Z \
+            -v /root/pull-secret:/root/pull-secret:ro,Z \
             -v /root/.ssh/id_rsa.pub:/root/.ssh/id_rsa.pub:ro,Z \
             -v "$RUNNER_TEMP/test-output":/tmp/test-output:Z \
             -e KUBECONFIG=/root/.kube/config \
