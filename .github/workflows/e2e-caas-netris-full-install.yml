@@ -379,6 +379,25 @@ jobs:
               > /root/.config/cluster-tool/servers.json
           fi
 
+          echo "=== cluster-tool client DNS setup ==="
+          # A booted clone's kubeconfig references it by hostname
+          # (api.test-infra-cluster-<id>.redhat.com, plus arbitrary
+          # *.apps.<id>.redhat.com route hostnames created later by
+          # caas_discovery/caas_setup/the test suite itself) -- resolvable
+          # only from a client with cluster-tool's own DNS integration,
+          # not from this box's default AWS-VPC-provided resolver.
+          # Confirmed live: oc/ansible get_url calls fail with NXDOMAIN
+          # without this. cluster-tool's own `setup client` command installs
+          # dnsmasq and points NetworkManager at it (dns=dnsmasq), which
+          # auto-registers each libvirt network's own DNS zone -- the
+          # supported mechanism for exactly this, run once since this box
+          # is single-use and destroyed after the job (no concern about
+          # accumulating config across concurrent/future clones, unlike a
+          # shared persistent box).
+          if [[ ! -f /etc/NetworkManager/conf.d/cluster-tool-dns.conf ]]; then
+            "${CLUSTER_TOOL_BIN}" setup client
+          fi
+
           echo "=== haproxy ==="
           # cluster-tool boot's "Configuring access" step shells out to
           # `cat /etc/haproxy/haproxy.cfg` and rewrites it to add per-clone
