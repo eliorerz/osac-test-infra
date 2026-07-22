@@ -289,6 +289,7 @@ jobs:
         env:
           FULFILLMENT_SERVICE_BRANCH: ${{ inputs.fulfillment-service-branch }}
           NAMESPACE: ${{ inputs.namespace }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           # snapshot_osac_namespace is included here (not just passed to
           # install-operators/install-osac's own INSTALLER_NAMESPACE env
@@ -311,7 +312,24 @@ jobs:
           # br-mgmt address (netris-lab/group_vars/all.yml's
           # mgmt_bridge_ip, also hardcoded in osac_post_refresh) reaches
           # the same haproxy without needing a real DNAT rule.
-          EXTRA_VARS=$(jq -cn --arg ns "${NAMESPACE}" '{snapshot_osac_namespace: $ns, caas_discovery_ocp_target_ip: "192.168.16.254"}')
+          #
+          # ocp_cluster_name/ocp_base_domain override caas_discovery's
+          # dnsmasq wildcard, which otherwise defaults to
+          # group_vars/all.yml's "ocp-sno"/"<lab_name>.<dns_hosted_zone>" --
+          # correct for the old recert-based control plane (recert.sh.j2
+          # renames the cluster to exactly those vars), but wrong here: the
+          # cluster-tool clone is never renamed, so its real route domain is
+          # "test-infra-cluster-<clone-name>.redhat.com" (see "Set clone
+          # name" step's CLONE_NAME=c${RUN_ID: -7}-caas, and cluster-tool's
+          # own kubeconfig hostname convention). Confirmed live in run
+          # 29940857732: without this, mgmt-server's dnsmasq wildcard never
+          # matched the agents' actual api./apps. lookups, so even with
+          # br-mgmt reachable (see openvpn-route-fix.sh.j2's route fix),
+          # discovery agents could never resolve the assisted-service/
+          # assisted-image-service routes to register.
+          CLONE_NAME="c${RUN_ID: -7}-caas"
+          EXTRA_VARS=$(jq -cn --arg ns "${NAMESPACE}" --arg cn "test-infra-cluster-${CLONE_NAME}" \
+            '{snapshot_osac_namespace: $ns, caas_discovery_ocp_target_ip: "192.168.16.254", ocp_cluster_name: $cn, ocp_base_domain: "redhat.com"}')
           if [[ -n "${FULFILLMENT_SERVICE_BRANCH}" ]]; then
             EXTRA_VARS=$(echo "${EXTRA_VARS}" | jq -c --arg v "${FULFILLMENT_SERVICE_BRANCH}" '. + {fulfillment_service_branch: $v}')
           fi
