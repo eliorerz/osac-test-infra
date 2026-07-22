@@ -442,6 +442,13 @@ jobs:
           # cluster-tool's own patch step tolerates a missing ingress-http
           # frontend the same no-op way described above.
           if ! grep -q "^frontend api$" /etc/haproxy/haproxy.cfg 2>/dev/null; then
+            # dnf install haproxy's own post-install scriptlet may have
+            # already started the service against the stock config it just
+            # shipped -- `systemctl enable --now` on an already-active unit
+            # is a no-op (doesn't reload), so stop it first to guarantee a
+            # clean start against the config written below regardless of
+            # whatever state the package left it in.
+            systemctl stop haproxy 2>/dev/null || true
             cat > /etc/haproxy/haproxy.cfg <<'HAPROXY_EOF'
           global
               log         127.0.0.1 local2
@@ -483,7 +490,16 @@ jobs:
               server fallback 127.0.0.1:1 check
           HAPROXY_EOF
           fi
-          systemctl enable --now haproxy
+          if ! systemctl enable --now haproxy; then
+            echo "::group::haproxy failed to start -- diagnostics"
+            cat /etc/haproxy/haproxy.cfg
+            echo "--- haproxy -c ---"
+            haproxy -c -f /etc/haproxy/haproxy.cfg || true
+            echo "--- journalctl -xeu haproxy ---"
+            journalctl -xeu haproxy --no-pager -n 60 || true
+            echo "::endgroup::"
+            exit 1
+          fi
 
           echo "=== oc CLI ==="
           if ! command -v oc &>/dev/null; then
