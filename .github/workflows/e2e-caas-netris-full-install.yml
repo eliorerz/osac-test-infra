@@ -687,6 +687,43 @@ jobs:
           cp "${HOME}/.kube/${CLONE_NAME}.kubeconfig" "$RUNNER_TEMP/kubeconfig"
           chmod 600 "$RUNNER_TEMP/kubeconfig"
 
+          # `cluster-tool boot` creates its own libvirt-managed network for
+          # this clone (e.g. test-infra-net-${CLONE_NAME}), which gets
+          # libvirt's default per-network isolation in the nftables
+          # "libvirt_network" table: guest_input/guest_output only pass
+          # already-established/related traffic across network boundaries,
+          # rejecting any *new* connection from another network. That's the
+          # right default for a normal cluster-tool clone (self-contained,
+          # nothing outside its own network needs to reach it) but breaks
+          # this hybrid flow on purpose: worker agents discovered on br-mgmt
+          # (192.168.16.0/20) need to open a brand-new connection to the
+          # hosted control plane's kube-apiserver LoadBalancer Service,
+          # which lives on the clone's own network (e.g. 192.168.160.0/24).
+          # Confirmed live in run 29940857732: a Day-2 worker agent sat
+          # looping "Approving CSRs"/"Rebooting" indefinitely (never
+          # appeared as a Node or CSR on the hosted cluster's own API
+          # server) while the host's own `nft` counters for
+          # "oif <clone-bridge> ... reject" climbed continuously -- the
+          # worker's join attempts were being rejected by this exact
+          # isolation, not a version or DNS problem. Since br-mgmt is the
+          # one network this hybrid flow always needs to reach into every
+          # clone network, open it explicitly rather than disabling
+          # isolation for all clones/networks on the box.
+          echo "Allowing br-mgmt to reach the new clone's network..."
+          nft insert rule ip libvirt_network guest_input ip saddr 192.168.16.0/20 accept
+          nft insert rule ip libvirt_network guest_output ip daddr 192.168.16.0/20 accept
+
+          # mgmt-server (192.168.16.1) has no specific route to the clone's
+          # network, so it falls through to its own default route (ens3,
+          # toward the host's virbr0) and MASQUERADEs the traffic to its own
+          # ens3-facing address -- meaning by the time a br-mgmt host's
+          # connection (relayed through mgmt-server) reaches this box, its
+          # source is 192.168.122.10, not 192.168.16.x. Confirmed live: the
+          # br-mgmt-only rule above didn't stop the reject counter climbing;
+          # this one, matching the actual masqueraded source, did.
+          echo "Allowing mgmt-server's masqueraded traffic to reach the new clone's network..."
+          nft insert rule ip libvirt_network guest_input ip saddr 192.168.122.0/24 accept
+
       - name: Build and load component image
         if: inputs.component-repo != ''
         env:
