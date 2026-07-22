@@ -99,6 +99,21 @@
   register: _pull_secret
   no_log: true
 
+# Moved ahead of InfraEnv/ISO creation (previously ran after ISO download,
+# only for VM boot management) because NMStateConfig -- see below -- has to
+# exist before the ISO is generated, and needs each VM's MAC address to
+# target it.
+- name: Find discovery VMs
+  ansible.builtin.shell:
+    cmd: virsh list --all --name | grep "{{ item }}"
+  register: _discovery_vm_lookup
+  changed_when: false
+  loop: "{{ caas_discovery_vm_patterns }}"
+
+- name: Build VM name list
+  ansible.builtin.set_fact:
+    caas_discovery_vms: "{{ _discovery_vm_lookup.results | map(attribute='stdout_lines') | map('first') | list }}"
+
 - name: Regenerate assisted-service auth keypair
   ansible.builtin.shell:
     cmd: |
@@ -139,6 +154,65 @@
   until: _pull_secret_result.rc == 0
   retries: 10
   delay: 15
+
+# These VMs have both a br-mgmt NIC (ens4) and Netris-fabric NICs (ens5+,
+# UDP-tunnel links into the simulated leaf-spine fabric) -- correct for the
+# original Netris-hosted-control-plane flow, where that fabric IS the
+# production network, but wrong for this hybrid flow, where the control
+# plane lives behind br-mgmt instead. OVN-Kubernetes' configure-ovs.sh
+# auto-selects an external-gateway NIC at first boot and, left to its own
+# devices, picks the Netris-fabric NIC (confirmed live in run 29960239943:
+# ens5 got enslaved into br-ex with a lower-metric default route than
+# ens4/br-mgmt, so the joining node's own traffic -- including its API-join
+# attempts -- went to the Netris fabric instead of back through mgmt-server
+# to the real control plane). Restarting ovs-configuration.service on an
+# already-booted node doesn't fix this -- confirmed live that it just
+# re-validates the already-enslaved NIC rather than re-selecting one -- so
+# this has to be corrected before the ISO is even generated.
+#
+# NMStateConfig is assisted-service's existing, already-wired mechanism for
+# exactly this (the InfraEnv's nmStateConfigLabelSelector, previously
+# dormant since no NMStateConfig CR existed anywhere in this repo): it
+# pre-configures each host's networking so the config is already correct at
+# first boot, before configure-ovs.sh ever runs. Mirrors the same
+# ens5-pinning pattern already used for the recert/snapshot path
+# (restore-snapshot's nmstate.yaml), just pinning ens4 instead and via the
+# agent-based mechanism rather than a static file. One CR per VM since
+# NMStateConfig targets a host by NIC MAC address, which differs per VM.
+- name: Get br-mgmt MAC address for each discovery VM
+  ansible.builtin.shell:
+    cmd: virsh domiflist {{ item }} | awk '$3=="br-mgmt" {print $NF}'
+  register: _discovery_vm_macs
+  changed_when: false
+  loop: "{{ caas_discovery_vms }}"
+
+- name: Build VM-to-MAC map for NMStateConfig
+  ansible.builtin.set_fact:
+    caas_discovery_vm_macs: "{{ caas_discovery_vm_macs | default([]) + [{'vm': item.item, 'mac': item.stdout | trim}] }}"
+  loop: "{{ _discovery_vm_macs.results }}"
+
+- name: Template NMStateConfig pinning br-mgmt as the default route
+  ansible.builtin.template:
+    src: nmstateconfig.yml.j2
+    dest: "/tmp/caas-nmstateconfig-{{ item.vm }}.yml"
+    mode: "0600"
+  loop: "{{ caas_discovery_vm_macs }}"
+  loop_control:
+    label: "{{ item.vm }}"
+
+- name: Apply NMStateConfig for each discovery VM
+  ansible.builtin.command:
+    cmd: oc apply -f "/tmp/caas-nmstateconfig-{{ item.vm }}.yml"
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _nmstateconfig_apply
+  changed_when: "'created' in _nmstateconfig_apply.stdout or 'configured' in _nmstateconfig_apply.stdout"
+  until: _nmstateconfig_apply.rc == 0
+  retries: 10
+  delay: 15
+  loop: "{{ caas_discovery_vm_macs }}"
+  loop_control:
+    label: "{{ item.vm }}"
 
 - name: Create InfraEnv CR
   ansible.builtin.template:
@@ -183,17 +257,6 @@
   until: _iso_download is success
   retries: 30
   delay: 10
-
-- name: Find discovery VMs
-  ansible.builtin.shell:
-    cmd: virsh list --all --name | grep "{{ item }}"
-  register: _discovery_vm_lookup
-  changed_when: false
-  loop: "{{ caas_discovery_vm_patterns }}"
-
-- name: Build VM name list
-  ansible.builtin.set_fact:
-    caas_discovery_vms: "{{ _discovery_vm_lookup.results | map(attribute='stdout_lines') | map('first') | list }}"
 
 - name: Get VM states
   ansible.builtin.shell:

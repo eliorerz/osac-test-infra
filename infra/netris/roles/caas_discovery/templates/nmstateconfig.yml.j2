@@ -1,0 +1,30 @@
+---
+apiVersion: agent-install.openshift.io/v1beta1
+kind: NMStateConfig
+metadata:
+  name: "{{ item.vm }}-br-mgmt-priority"
+  namespace: {{ caas_discovery_infraenv_namespace }}
+  labels:
+    infraenvs.agent-install.openshift.io: {{ caas_discovery_infraenv_name }}
+spec:
+  config:
+    interfaces:
+    - name: ens4
+      type: ethernet
+      state: up
+      ipv4:
+        enabled: true
+        dhcp: true
+      ipv6:
+        enabled: false
+        dhcp: false
+        autoconf: false
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-interface: ens4
+        metric: 40
+        table-id: 254
+  interfaces:
+  - name: ens4
+    macAddress: "{{ item.mac }}"
