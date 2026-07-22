@@ -122,6 +122,7 @@ packages:
 # every boot
 bootcmd:
   - [ sh, -c, 'echo $(date) | sudo tee -a /root/bootcmd.log' ]
+  - [ sh, -c, "mkdir -p /etc/apt/apt.conf.d && echo 'Acquire::ForceIPv4 \"true\";' > /etc/apt/apt.conf.d/99force-ipv4" ]
 # run once for setup
 runcmd:
   - [ sh, -c, 'echo $(date) | sudo tee -a /root/runcmd.log' ]
@@ -439,6 +440,7 @@ packages:
 # every boot
 bootcmd:
   - [ sh, -c, 'echo $(date) | sudo tee -a /root/bootcmd.log' ]
+  - [ sh, -c, "mkdir -p /etc/apt/apt.conf.d && echo 'Acquire::ForceIPv4 \"true\";' > /etc/apt/apt.conf.d/99force-ipv4" ]
   - [ sh, -c, 'bash /etc/network_nics_up.sh' ]
 # run once for setup
 runcmd:
@@ -632,6 +634,7 @@ packages:
 # every boot
 bootcmd:
   - [ sh, -c, 'echo $(date) | sudo tee -a /root/bootcmd.log' ]
+  - [ sh, -c, "mkdir -p /etc/apt/apt.conf.d && echo 'Acquire::ForceIPv4 \"true\";' > /etc/apt/apt.conf.d/99force-ipv4" ]
 # run once for setup
 runcmd:
   - [ sh, -c, 'echo $(date) | sudo tee -a /root/runcmd.log' ]
@@ -831,6 +834,7 @@ packages:
 # every boot
 bootcmd:
   - [ sh, -c, 'echo $(date) | sudo tee -a /root/bootcmd.log' ]
+  - [ sh, -c, "mkdir -p /etc/apt/apt.conf.d && echo 'Acquire::ForceIPv4 \"true\";' > /etc/apt/apt.conf.d/99force-ipv4" ]
 # run once for setup
 runcmd:
   - [ sh, -c, 'echo $(date) | sudo tee -a /root/runcmd.log' ]
@@ -1017,6 +1021,7 @@ packages:
 # every boot
 bootcmd:
   - [ sh, -c, 'echo $(date) | sudo tee -a /root/bootcmd.log' ]
+  - [ sh, -c, "mkdir -p /etc/apt/apt.conf.d && echo 'Acquire::ForceIPv4 \"true\";' > /etc/apt/apt.conf.d/99force-ipv4" ]
 # run once for setup
 runcmd:
   - [ sh, -c, 'echo $(date) | sudo tee -a /root/runcmd.log' ]
