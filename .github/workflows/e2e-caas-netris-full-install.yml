@@ -62,11 +62,6 @@ on:
         required: false
         type: string
         default: "osac-e2e-ci"
-      cluster-template:
-        description: "Cluster template for CaaS tests"
-        required: false
-        type: string
-        default: "osac.templates.ocp_ci_small"
       flavor-image:
         description: "OCI image containing the cluster-tool flavor"
         required: false
@@ -293,8 +288,18 @@ jobs:
         shell: bash
         env:
           FULFILLMENT_SERVICE_BRANCH: ${{ inputs.fulfillment-service-branch }}
+          NAMESPACE: ${{ inputs.namespace }}
         run: |
-          EXTRA_VARS="{}"
+          # snapshot_osac_namespace is included here (not just passed to
+          # install-operators/install-osac's own INSTALLER_NAMESPACE env
+          # var) because caas_setup and osac_post_refresh (run later, via
+          # configure-netris-hybrid and setup-suite) both key off this
+          # ansible var directly, hardcoded to default "osac-e2e-ci" in
+          # group_vars/all.yml -- without this, overriding the `namespace`
+          # input away from its default would install OSAC into one
+          # namespace while those two roles silently kept looking in
+          # another.
+          EXTRA_VARS=$(jq -cn --arg ns "${NAMESPACE}" '{snapshot_osac_namespace: $ns}')
           if [[ -n "${FULFILLMENT_SERVICE_BRANCH}" ]]; then
             EXTRA_VARS=$(echo "${EXTRA_VARS}" | jq -c --arg v "${FULFILLMENT_SERVICE_BRANCH}" '. + {fulfillment_service_branch: $v}')
           fi
@@ -812,7 +817,8 @@ jobs:
         shell: bash
         env:
           LAB_NAME: ci-${{ github.run_id }}
-        run: make -C infra/netris -f contract.mk configure-netris-hybrid
+          EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
+        run: make -C infra/netris -f contract.mk configure-netris-hybrid EXTRA_VARS="${EXTRA_VARS}"
 
       # caas_discovery + caas_setup: boots h01-h03 with the real assisted-
       # installer discovery ISO, registers them as Agent CRs, labels/
@@ -834,6 +840,14 @@ jobs:
           TEST_FILTER: ${{ inputs.test-filter }}
           E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"
           OSAC_NAMESPACE: ${{ inputs.namespace }}
+          # Not an overridable input: caas_setup registers the fulfillment-
+          # side catalog item under group_vars/all.yml's own
+          # caas_cluster_template ("osac.templates.ocp_ci_small") -- an
+          # override here without also touching that group_var would just
+          # make the test look for a catalog item that was never
+          # registered. Matches e2e-caas-netris.yml's own precedent (no
+          # override capability at all).
+          OSAC_CLUSTER_TEMPLATE: "osac.templates.ocp_ci_small"
         run: |
           FILTER_ARGS=""
           if [ -n "${TEST_FILTER}" ]; then
@@ -849,6 +863,7 @@ jobs:
             -e KUBECONFIG=/root/.kube/config \
             -e OSAC_VM_KUBECONFIG=/root/.kube/config \
             -e OSAC_NAMESPACE="${OSAC_NAMESPACE}" \
+            -e OSAC_CLUSTER_TEMPLATE="${OSAC_CLUSTER_TEMPLATE}" \
             -e OSAC_PULL_SECRET_PATH=/root/pull-secret \
             -e PYTHONUNBUFFERED=1 \
             "${E2E_IMAGE}" \
