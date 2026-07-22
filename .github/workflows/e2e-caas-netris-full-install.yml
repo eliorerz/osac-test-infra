@@ -406,12 +406,42 @@ jobs:
           echo "=== haproxy ==="
           # cluster-tool boot's "Configuring access" step shells out to
           # `cat /etc/haproxy/haproxy.cfg` and rewrites it to add per-clone
-          # frontends/backends -- it doesn't create the base file itself.
-          # bind *:6443/443/80 listens on every host interface, including
-          # br-mgmt, which is what lets anything already on br-mgmt (Netris
-          # controller, agents, mgmt-server) reach OCP API/ingress without
-          # the control plane being Netris-managed itself.
-          if [[ ! -f /etc/haproxy/haproxy.cfg ]]; then
+          # frontends/backends by string-replacing a "    default_backend
+          # <key>-" marker inside each frontend -- it doesn't create the
+          # base file itself. bind *:6443/443 listens on every host
+          # interface, including br-mgmt, which is what lets anything
+          # already on br-mgmt (Netris controller, agents, mgmt-server)
+          # reach OCP API/ingress without the control plane being Netris-
+          # managed itself.
+          #
+          # Checking -f (file exists) instead of grepping for content was
+          # wrong: `dnf install haproxy` (tooling-check-cmds, before this
+          # step ever runs) already drops RHEL's own stock example config
+          # at this exact path, so -f was always true and this block never
+          # actually wrote anything on a freshly-provisioned EC2 box.
+          # Confirmed live: cluster-tool's own patch step's marker-replace
+          # silently no-ops when a frontend/marker isn't present (Python
+          # str.replace() on a missing substring is a no-op, not an error)
+          # -- it still appended backend blocks unconditionally, but with no
+          # matching frontends/binds at all, so nothing was listening on
+          # 6443/443 ("connection refused").
+          #
+          # No frontend ingress-http/bind *:80 here (unlike this step's
+          # first draft): infra/netris/roles/lab_deploy's connectivity role
+          # (deploy-infra, run earlier in this same job) unconditionally
+          # binds its own socat forwarder to this exact host's default
+          # IPv4:80 for Netris controller web-UI access -- confirmed live,
+          # a `bind *:80` here collided with it and made haproxy's entire
+          # config reload fail atomically (one frontend failing to bind
+          # kills the whole process, not just that frontend), which is
+          # *why* 6443/443 didn't work either despite not being
+          # individually conflicted. Nothing in this pipeline needs plain-
+          # HTTP OCP ingress (only the API on 6443 and HTTPS routes on 443
+          # are ever used), so dropping it entirely -- rather than picking
+          # a different bind target -- avoids the conflict outright.
+          # cluster-tool's own patch step tolerates a missing ingress-http
+          # frontend the same no-op way described above.
+          if ! grep -q "^frontend api$" /etc/haproxy/haproxy.cfg 2>/dev/null; then
             cat > /etc/haproxy/haproxy.cfg <<'HAPROXY_EOF'
           global
               log         127.0.0.1 local2
@@ -450,15 +480,6 @@ jobs:
               default_backend ingress-https-fallback
 
           backend ingress-https-fallback
-              server fallback 127.0.0.1:1 check
-
-          frontend ingress-http
-              bind *:80
-              mode http
-              default_backend ingress-http-fallback
-
-          backend ingress-http-fallback
-              mode http
               server fallback 127.0.0.1:1 check
           HAPROXY_EOF
           fi
