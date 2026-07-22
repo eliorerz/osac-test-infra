@@ -12,6 +12,7 @@
     path: /etc/dnsmasq.d/ocp-sno.conf
     line: "{{ item }}"
     state: present
+    create: true
   loop:
     - "interface=br-mgmt"
     - "no-dhcp-interface=br-mgmt"
