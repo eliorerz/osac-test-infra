@@ -7,6 +7,15 @@
 # outright ("Address already in use"). bind-interfaces makes dnsmasq bind
 # only its named interfaces (br-mgmt here, where the OCP node and discovery
 # agents actually live) instead of the wildcard address.
+#
+# Even with bind-interfaces + interface=br-mgmt, dnsmasq still implicitly
+# also tries to bind loopback (127.0.0.1:53) -- it always listens there
+# unless explicitly excluded. On this host that collides with NetworkManager's
+# own dnsmasq stub resolver ("Address already in use", control process exits
+# with status 2), which cluster-tool's client DNS setup
+# (/etc/NetworkManager/conf.d/cluster-tool-dns.conf) already put in place on
+# 127.0.0.1:53. except-interface=lo excludes loopback from this instance's
+# binds so the two dnsmasq processes stop fighting over the same port.
 - name: Ensure dnsmasq listens on br-mgmt for agent DNS
   ansible.builtin.lineinfile:
     path: /etc/dnsmasq.d/ocp-sno.conf
@@ -17,6 +26,7 @@
     - "interface=br-mgmt"
     - "no-dhcp-interface=br-mgmt"
     - "bind-interfaces"
+    - "except-interface=lo"
   register: _dnsmasq_mgmt
   notify: restart dnsmasq
 
