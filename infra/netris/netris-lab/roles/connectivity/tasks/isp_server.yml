@@ -49,6 +49,16 @@
 # while after cloud-init itself reports done -- retries are cheap here
 # (a lock-contention failure returns in ~1s, not the 10m ssh timeout), so
 # the retry count gives that other process real time to finish.
+#
+# The original 20 retries * 15s delay (5min) budget wasn't always enough:
+# confirmed live in run 29956751503 -- all 20 attempts failed identically
+# with "Could not get lock /var/lib/apt/lists/lock. It is held by process
+# 1028 (apt-get)", meaning cloud-init's background apt activity held the
+# lock for the entire 5-minute window under that run's real multi-VM-boot
+# contention (host load average 8-11 with all 15 lab VMs booting at once).
+# Same class of fix as the mgmt-server OpenVPN wait's budget doubling
+# (commit 7c4dec5) -- genuine contention exceeding the allotted budget,
+# not a logic bug -- so doubling this budget too (5min -> 10min).
 - name: Install and start FRR on ISP server
   when: isp_frr_check.stdout is not defined or isp_frr_check.stdout != "active"
   shell: |
@@ -62,5 +72,5 @@
     "
   register: _frr_install
   until: _frr_install.rc == 0
-  retries: 20
+  retries: 40
   delay: 15
