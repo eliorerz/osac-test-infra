@@ -48,10 +48,10 @@ on:
         type: string
         default: "osac-ci-orchestrator"
       tooling-check-cmds:
-        description: "Semicolon-separated commands to run/verify on the box before JIT registration. Installs both cluster-tool's virtualization stack and the Netris lab's ansible stack -- the stateful bootstrap (cluster-tool clone/config, haproxy base config, SSH keypair) happens in the test job itself, since it needs multi-line logic tooling-check-cmds can't express. Also downgrades openssl-libs one point release: 3.5.5-5.el9_8's ASN.1 end-of-data hardening breaks CPython's SSLContext.load_verify_locations(cadata=...) (ansible/ansible#87251, python/cpython#151504), which ansible-galaxy's Galaxy-API client hits on every collection install -- confirmed live (100% reproduction against galaxy.ansible.com on this fleet's current AMI, while curl/plain urllib against the same host succeed). Remove once the upstream CPython fix lands and this AMI picks it up."
+        description: "Semicolon-separated commands to run/verify on the box before JIT registration. Installs both cluster-tool's virtualization stack and the Netris lab's ansible stack -- the stateful bootstrap (cluster-tool clone/config, haproxy base config, SSH keypair, openssl-libs regression workaround) happens in the test job itself, since it needs multi-line logic (and, for the openssl-libs workaround, warm dnf metadata -- see the Bootstrap step) that tooling-check-cmds can't express."
         required: false
         type: string
-        default: "dnf downgrade -y openssl-libs-3.5.5-4.el9_8 || true; dnf install -y libvirt qemu-kvm virt-install podman skopeo zstd pigz jq haproxy git ansible-core python3-pip make; systemctl enable --now libvirtd; pip3 install ansible; command -v virt-install; command -v ansible-playbook; command -v make"
+        default: "dnf install -y libvirt qemu-kvm virt-install podman skopeo zstd pigz jq haproxy git ansible-core python3-pip make; systemctl enable --now libvirtd; pip3 install ansible; command -v virt-install; command -v ansible-playbook; command -v make"
       test-filter:
         description: "pytest -k filter expression (optional)"
         required: false
@@ -318,6 +318,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "=== openssl-libs regression workaround ==="
+          # ansible-galaxy's Galaxy-API client intermittently fails against
+          # galaxy.ansible.com with "[ASN1: NOT_ENOUGH_DATA]" on this AMI's
+          # openssl-libs-3.5.5-5.el9_8 (ansible/ansible#87251, python/
+          # cpython#151504: OpenSSL 3.5.5-5's ASN.1 end-of-data hardening
+          # breaks CPython's SSLContext.load_verify_locations(cadata=...),
+          # which ansible-galaxy's HTTP client uses but curl/plain urllib's
+          # default-context cert loading doesn't). Downgrading to the
+          # previous point release fixes it -- confirmed live. This runs
+          # here, in the test job, rather than in tooling-check-cmds's
+          # pass/fail-only gate: a downgrade attempted before
+          # tooling-check-cmds's own `dnf install` populates dnf's metadata
+          # cache on a freshly-booted box silently no-ops (confirmed live:
+          # `dnf downgrade` returned 0 but left the vulnerable version
+          # installed) -- by this point in the job, that cache is warm.
+          # Best-effort with explicit before/after verification (not
+          # `|| true` alone) so a silent no-op is visible in job logs
+          # instead of masquerading as success. Remove once the upstream
+          # CPython fix lands and this AMI picks it up.
+          if [[ "$(rpm -q --qf '%{VERSION}-%{RELEASE}' openssl-libs)" == "3.5.5-5.el9_8" ]]; then
+            for attempt in 1 2 3; do
+              dnf downgrade -y openssl-libs-3.5.5-4.el9_8 openssl-3.5.5-4.el9_8 openssl-fips-provider-3.5.5-4.el9_8 || true
+              CURRENT="$(rpm -q --qf '%{VERSION}-%{RELEASE}' openssl-libs)"
+              if [[ "${CURRENT}" != "3.5.5-5.el9_8" ]]; then
+                echo "openssl-libs downgraded to ${CURRENT} (attempt ${attempt})"
+                break
+              fi
+              echo "openssl-libs downgrade attempt ${attempt} did not take (still ${CURRENT}), retrying..."
+              sleep 5
+            done
+            if [[ "$(rpm -q --qf '%{VERSION}-%{RELEASE}' openssl-libs)" == "3.5.5-5.el9_8" ]]; then
+              echo "::warning::openssl-libs downgrade did not take after 3 attempts -- ansible-galaxy may hit the ASN1 TLS bug"
+            fi
+          else
+            echo "openssl-libs already at $(rpm -q --qf '%{VERSION}-%{RELEASE}' openssl-libs), no downgrade needed"
+          fi
 
           echo "=== cluster-tool ==="
           CLUSTER_TOOL_DIR=/opt/cluster-tool
