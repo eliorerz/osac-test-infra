@@ -751,8 +751,17 @@ jobs:
         env:
           KUBECONFIG: ${{ runner.temp }}/kubeconfig
           INSTALLER_NAMESPACE: ${{ inputs.namespace }}
-          INSTALLER_REF: ${{ inputs.installer-ref }}
-          INSTALLER_REPO: ${{ inputs.installer-repo }}
+          # `|| 'default'` here, not just this workflow_call input's own
+          # `default:` -- the caller passes installer-ref/installer-repo
+          # through as `${{ inputs.installer-ref || '' }}` (empty string
+          # when the dispatch-time input is unset), and workflow_call
+          # input defaults only apply when the caller omits the key
+          # entirely, not when it's explicitly set to "". Confirmed live:
+          # without this, INSTALLER_REPO ends up "" and `git clone
+          # https://github.com/${INSTALLER_REPO}.git` fails with "fatal:
+          # repository 'https://github.com/.git/' not found".
+          INSTALLER_REF: ${{ inputs.installer-ref || 'main' }}
+          INSTALLER_REPO: ${{ inputs.installer-repo || 'osac-project/osac-installer' }}
         run: |
           if ! command -v helm &>/dev/null; then
             curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
