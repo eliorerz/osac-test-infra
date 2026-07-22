@@ -403,6 +403,25 @@ jobs:
             "${CLUSTER_TOOL_BIN}" setup client
           fi
 
+          echo "=== SELinux port label for haproxy on 6443 ==="
+          # This AMI runs SELinux enforcing (Rocky Linux) -- confirmed live
+          # via ausearch -m avc: "denied { name_bind } for pid=<haproxy>
+          # comm=\"haproxy\" src=6443 scontext=...:haproxy_t:s0
+          # tcontext=...:unreserved_port_t:s0". haproxy_t is only allowed to
+          # bind ports already labeled for it (443 already is, via
+          # http_port_t's default port list -- confirmed via `semanage port
+          # -l`); 6443 has no label at all, so it falls back to
+          # unreserved_port_t, which haproxy_t can't bind under enforcing.
+          # The debug box this branch was otherwise validated against
+          # doesn't have this restriction (SELinux disabled/permissive
+          # there), which is why this was never caught before a real EC2
+          # dispatch. Idempotent: only adds the mapping if not already
+          # present, so a persistent (non-ephemeral) box wouldn't error on
+          # a second run.
+          if ! semanage port -l | grep -qP '^http_port_t\s+tcp\s+.*\b6443\b'; then
+            semanage port -a -t http_port_t -p tcp 6443
+          fi
+
           echo "=== haproxy ==="
           # cluster-tool boot's "Configuring access" step shells out to
           # `cat /etc/haproxy/haproxy.cfg` and rewrites it to add per-clone
