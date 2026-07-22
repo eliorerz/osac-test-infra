@@ -6,5 +6,6 @@ metadata:
 spec:
   valuesContent: |-
     service:
+      type: NodePort
       spec:
         externalTrafficPolicy: Local
