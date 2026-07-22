@@ -299,7 +299,19 @@ jobs:
           # input away from its default would install OSAC into one
           # namespace while those two roles silently kept looking in
           # another.
-          EXTRA_VARS=$(jq -cn --arg ns "${NAMESPACE}" '{snapshot_osac_namespace: $ns}')
+          # caas_discovery_ocp_target_ip overrides caas_discovery's DNS
+          # target for the api.*/apps.* hostnames it hands the discovery
+          # agents (defaults to ocp_dnat_ip, a Netris-DNAT address that only
+          # exists when netris_configure's control-plane VNet/DNAT block
+          # runs -- which this hybrid flow deliberately skips, see
+          # configure-netris-hybrid.yml). This control plane isn't
+          # Netris-managed at all: cluster-tool's own haproxy already
+          # reverse-proxies OCP API/ingress on every host interface,
+          # including br-mgmt, so pointing agents at the host's fixed
+          # br-mgmt address (netris-lab/group_vars/all.yml's
+          # mgmt_bridge_ip, also hardcoded in osac_post_refresh) reaches
+          # the same haproxy without needing a real DNAT rule.
+          EXTRA_VARS=$(jq -cn --arg ns "${NAMESPACE}" '{snapshot_osac_namespace: $ns, caas_discovery_ocp_target_ip: "192.168.16.254"}')
           if [[ -n "${FULFILLMENT_SERVICE_BRANCH}" ]]; then
             EXTRA_VARS=$(echo "${EXTRA_VARS}" | jq -c --arg v "${FULFILLMENT_SERVICE_BRANCH}" '. + {fulfillment_service_branch: $v}')
           fi
