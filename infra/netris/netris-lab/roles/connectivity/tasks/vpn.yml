@@ -23,7 +23,7 @@
   shell: ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@192.168.122.10 "systemctl is-active openvpn@server"
   register: vpn_server_check
   until: vpn_server_check.stdout == "active"
-  retries: 30
+  retries: 60
   delay: 10
   changed_when: false
 
