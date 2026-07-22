@@ -250,3 +250,29 @@
           editable: true
     validate_certs: false
     status_code: [200, 201, 409]
+
+# Step 6: Start the HostedCluster DNS watcher for the test suite's benefit.
+#
+# ClusterOrders (and their HostedCluster kube-apiserver Services) don't exist
+# yet at this point -- the test suite creates them later. Each one gets a
+# different IP from MetalLB's caas-address-pool, so unlike the hosting
+# cluster's own fixed api./apps. wildcard (wired earlier in caas_discovery),
+# there's no single static DNS entry that can point worker nodes at it.
+# Started as a detached background process (not an ansible-async task) so it
+# keeps running across the GH Actions step boundary into "Run CaaS e2e tests"
+# -- ansible's own play/role scope ends when this task returns, but the
+# process it launches outlives it on the same runner.
+- name: Copy HostedCluster DNS watcher script
+  ansible.builtin.copy:
+    src: hostedcluster-dns-watcher.sh
+    dest: /usr/local/bin/hostedcluster-dns-watcher.sh
+    mode: "0755"
+
+- name: Start HostedCluster DNS watcher in background
+  ansible.builtin.shell:
+    cmd: >-
+      nohup /usr/local/bin/hostedcluster-dns-watcher.sh
+      /root/.kube/config "{{ ocp_base_domain }}" 192.168.16.1
+      >/var/log/hostedcluster-dns-watcher.log 2>&1 &
+    creates: /var/log/hostedcluster-dns-watcher.log
+  changed_when: true
