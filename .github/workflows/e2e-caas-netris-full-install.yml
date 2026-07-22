@@ -711,6 +711,15 @@ jobs:
           INSTALLER_DIR="$RUNNER_TEMP/osac-installer"
           cd "${INSTALLER_DIR}"
 
+          # osac-installer's own install-secrets target (a dependency of
+          # install-osac) expects the AAP license at
+          # values/<values-dir>/license.zip -- a different path than where
+          # stage-caas-netris-secrets.sh puts it (infra/netris/license.zip,
+          # for that script's own golden-snapshot/osac_refresh consumer).
+          # Confirmed live: without this, install-osac fails immediately
+          # with "ERROR: AAP license not found at values/caas-ci/license.zip".
+          cp "${GITHUB_WORKSPACE}/infra/netris/license.zip" values/caas-ci/license.zip
+
           make install-osac VALUES_FILE=values/caas-ci/values.yaml
 
           MERGED_OVERRIDES="${IMAGE_OVERRIDES}"
