@@ -16,6 +16,7 @@
   vars:
     netris_configure_control_plane_networking: false
     osac_post_refresh_manage_ingress_forwarder: false
+    osac_post_refresh_hybrid_control_plane: true
   roles:
     - netris_configure
     - osac_post_refresh
