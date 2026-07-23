@@ -46,6 +46,26 @@ on:
         description: "Branch, tag, or commit of osac-installer to clone -- empty means main."
         required: false
         default: ""
+      component-repo:
+        description: "GitHub repo (owner/name) of a component to build from source and load onto the cluster pre-install, e.g. osac-project/osac-aap to test an AAP config-as-code PR pre-merge -- empty means no override. Requires component-ref and component-image-key. Not sensitive: a public repo owner/name."
+        required: false
+        default: ""
+      component-ref:
+        description: "Branch or tag name of the component repository to build (must be a named ref, not a SHA)."
+        required: false
+        default: ""
+      component-image-key:
+        description: "Helm value path for the component image, e.g. aap.bootstrap.image (also wires aap.configAsCode.projectGitBranch/projectGitUri to component-repo/component-ref) or service.images.service."
+        required: false
+        default: ""
+      component-containerfile:
+        description: "Path to Containerfile (or ansible-builder EE definition, if component-build-type is ansible-builder) relative to component repo root -- e.g. osac-aap's execution-environment/execution-environment.yaml."
+        required: false
+        default: "Containerfile"
+      component-build-type:
+        description: "Build method: 'containerfile' (default) or 'ansible-builder' (e.g. for osac-aap's execution environment)."
+        required: false
+        default: "containerfile"
 
 jobs:
   e2e-caas-netris-full-install:
@@ -58,3 +78,8 @@ jobs:
       image-overrides: ${{ inputs.image-overrides || '{}' }}
       installer-repo: ${{ inputs.installer-repo || '' }}
       installer-ref: ${{ inputs.installer-ref || '' }}
+      component-repo: ${{ inputs.component-repo || '' }}
+      component-ref: ${{ inputs.component-ref || '' }}
+      component-image-key: ${{ inputs.component-image-key || '' }}
+      component-containerfile: ${{ inputs.component-containerfile || 'Containerfile' }}
+      component-build-type: ${{ inputs.component-build-type || 'containerfile' }}
