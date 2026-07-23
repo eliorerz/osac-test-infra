@@ -913,12 +913,37 @@ jobs:
               echo "  --set-string ${key}=${value}"
             done
 
+            # --no-hooks by default: for a plain image-tag override (the
+            # common case, e.g. service.images.service) re-running the AAP
+            # bootstrap Job/create-api-token hooks is pure wasted time.
+            # BUT: `make install-osac` (above) already ran the *initial*
+            # helm install and its post-install bootstrap-job hook fired
+            # then, against whatever aap.configAsCode.projectGitBranch was
+            # set to at THAT point (the chart default, "main" -- this
+            # override block runs strictly after). When this override is
+            # specifically repointing aap.configAsCode.projectGitBranch (the
+            # aap.bootstrap.image component path, just above), skipping
+            # hooks here means AAP's config-as-code Project silently keeps
+            # syncing "main" forever -- the override reaches the Helm
+            # values/Secret but the SCM sync that actually reads it never
+            # re-runs. Confirmed live (run 29982571532): projectGitBranch
+            # was correctly set to a PR branch in the released values, but
+            # the live AAP Project's scm_branch/scm_revision was pinned to a
+            # main-branch commit SHA -- the bootstrap Job that ran had used
+            # the pre-override default. bootstrap-job.yaml's hook-delete-
+            # policy (before-hook-creation) makes it safe to let this
+            # specific upgrade re-fire it.
+            HELM_HOOK_ARGS=(--no-hooks)
+            if [[ "${COMPONENT_IMAGE_KEY}" == "aap.bootstrap.image" ]]; then
+              HELM_HOOK_ARGS=()
+            fi
+
             yq -i '(.dependencies[].version) = "0.0.0"' charts/osac/Chart.yaml
             helm dependency update charts/osac/
             helm upgrade osac charts/osac/ \
               --namespace "${INSTALLER_NAMESPACE}" \
               --reuse-values \
-              --no-hooks \
+              "${HELM_HOOK_ARGS[@]}" \
               "${SET_ARGS[@]}" \
               --timeout 10m \
               --wait
