@@ -109,6 +109,7 @@
         --from-literal=NETRIS_TENANT_NAME=Admin \
         --from-literal=NETRIS_MGMT_VPC_ID={{ netris_vpc_by_name[ocp_vpc_name].id }} \
         --from-literal=NETRIS_MGMT_VPC_NAME={{ ocp_vpc_name }} \
+        --from-literal=NETRIS_HYBRID_CONTROL_PLANE={{ osac_post_refresh_hybrid_control_plane | default(false) }} \
         --from-literal='NETRIS_RESOURCE_CLASS_MAP={{ _netris_resource_class_map | to_json }}' \
         --from-literal=SERVER_MGMT_ROUTE_DESTINATION=192.168.16.0/20 \
         --from-literal=SERVER_MGMT_ROUTE_GATEWAY=192.168.16.1 \
