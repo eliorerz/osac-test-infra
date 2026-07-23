@@ -306,10 +306,18 @@
   ansible.builtin.set_fact:
     _netris_sct_id: "{{ netris_sct_by_name[caas_server_cluster_template_name].id }}"
 
+# mgmt_route_metric/vpc_route_metric override osac-aap's nmstate_config role
+# defaults (mgmt=100, vpc=50 -- vpc wins), which assume the ORIGINAL
+# Netris-hosted-control-plane design where the Netris fabric IS the
+# production network. This hybrid flow's control plane lives behind
+# br-mgmt instead, so mgmt must win here -- confirmed live (run 29968016281)
+# that leaving these unset applies the role's defaults byte-for-byte
+# (h02's nmconnection files showed exactly metric=100/50), misrouting the
+# joining worker's own traffic to the Netris fabric.
 - name: Build resource class map
   ansible.builtin.set_fact:
     _netris_resource_class_map: >-
-      {"{{ caas_host_type_id }}":{"server_cluster_template_id":{{ _netris_sct_id }},"mgmt_interface":"ens4","vpc_interfaces":["ens5"]}}
+      {"{{ caas_host_type_id }}":{"server_cluster_template_id":{{ _netris_sct_id }},"mgmt_interface":"ens4","vpc_interfaces":["ens5"],"mgmt_route_metric":40,"vpc_route_metric":50}}
 
 - name: Copy SSH keys for Netris integration
   ansible.builtin.copy:
