@@ -17,6 +17,7 @@
 #   cluster-tool   Install and configure cluster-tool for local CI mode
 #   vault          Install Vault CLI
 #   grpcurl        Install grpcurl
+#   caas-reaper    Install/enable the daily stale-CaaS-VM reaper timer
 #   verify         Show installed versions and storage info
 #
 # Options:
@@ -59,7 +60,7 @@ while [[ $# -gt 0 ]]; do
             sed -n '2,/^[^#]/{ /^#/s/^# \?//p }' "$0"
             exit 0
             ;;
-        packages|runner-user|services|oc|osac|cluster-tool|vault|grpcurl|verify)
+        packages|runner-user|services|oc|osac|cluster-tool|vault|grpcurl|caas-reaper|verify)
             STEPS+=("$1")
             shift
             ;;
@@ -73,7 +74,7 @@ done
 
 # Default: run all steps
 if [[ ${#STEPS[@]} -eq 0 ]]; then
-    STEPS=(packages runner-user services oc osac cluster-tool vault grpcurl verify)
+    STEPS=(packages runner-user services oc osac cluster-tool vault grpcurl caas-reaper verify)
 fi
 
 ###############################################################################
@@ -594,6 +595,43 @@ install_grpcurl() {
 }
 
 ###############################################################################
+# Step: caas-reaper
+###############################################################################
+setup_caas_reaper() {
+    echo "==> Installing stale-CaaS-VM reaper..."
+
+    install -m 0755 "${SCRIPT_DIR}/reap-stale-caas-vms.sh" /usr/local/sbin/reap-stale-caas-vms
+    echo "    Installed /usr/local/sbin/reap-stale-caas-vms"
+
+    cat > /etc/systemd/system/reap-stale-caas-vms.service <<EOF
+[Unit]
+Description=Reap stale CaaS e2e agent/cluster VMs
+
+[Service]
+Type=oneshot
+User=${RUNNER_USER}
+ExecStart=/usr/local/sbin/reap-stale-caas-vms
+EOF
+
+    cat > /etc/systemd/system/reap-stale-caas-vms.timer <<'EOF'
+[Unit]
+Description=Daily reap of stale CaaS e2e VMs
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now reap-stale-caas-vms.timer
+    echo "    Enabled reap-stale-caas-vms.timer (daily, ~03:17 local + up to 10min jitter)"
+}
+
+###############################################################################
 # Step: verify
 ###############################################################################
 run_verify() {
@@ -676,6 +714,7 @@ should_run osac          && install_osac
 should_run cluster-tool  && setup_cluster_tool
 should_run vault         && install_vault
 should_run grpcurl       && install_grpcurl
+should_run caas-reaper   && setup_caas_reaper
 should_run verify        && run_verify
 
 echo ""
