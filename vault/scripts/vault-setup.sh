@@ -113,6 +113,28 @@ if [[ "${MODE}" == "agent" ]]; then
     fi
     export VAULT_TOKEN
 
+    # Preflight: verify the central host is actually reachable before doing
+    # any of the stateful/interactive setup below. Cross-account/cross-datacenter
+    # private network paths between fleet hosts have been observed to silently
+    # block *new* SSH connections while leaving already-established tunnels
+    # working fine -- if that's the case here, fail fast with a clear next
+    # step instead of getting deep into Phase 4's tunnel-wait loop only to
+    # time out with a generic "not reachable" message.
+    echo "  Checking connectivity to ${CENTRAL_HOST}:22 ..."
+    if ! timeout 5 bash -c "echo > /dev/tcp/${CENTRAL_HOST}/22" 2>/dev/null; then
+        echo "ERROR: cannot reach ${CENTRAL_HOST} on port 22." >&2
+        echo "  If ${CENTRAL_HOST} resolves (via /etc/hosts) to a private IP on a" >&2
+        echo "  different account/datacenter than this host, that private network" >&2
+        echo "  path may silently block new connections while leaving existing" >&2
+        echo "  tunnels untouched (seen with osac-2 -- private cross-account path" >&2
+        echo "  to osac-ci-1 blocked new connections, public IP worked fine)." >&2
+        echo "  Try pointing /etc/hosts at the central host's PUBLIC IP instead --" >&2
+        echo "  every existing agent host already does this; check their" >&2
+        echo "  /etc/hosts for the working entry -- and re-run." >&2
+        exit 1
+    fi
+    echo "  Reachable."
+
     ###########################################################################
     # Agent Phase 1: Create directory layout
     ###########################################################################

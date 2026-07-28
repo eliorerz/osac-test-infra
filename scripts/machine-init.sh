@@ -349,10 +349,17 @@ SSHD_OOM_EOF
     # Podman socket for GitHub Actions (docker compatibility)
     systemctl enable --now podman.socket
 
-    # Persistent journal (survives reboots for post-mortem debugging)
-    mkdir -p /var/log/journal
+    # Persistent journal (survives reboots for post-mortem debugging).
+    # Uses a journald.conf.d/ drop-in rather than sed-patching
+    # /etc/systemd/journald.conf directly -- some base images ship without
+    # that file at all, which would make the sed a no-op silently (or fail
+    # outright under `set -e`).
+    mkdir -p /var/log/journal /etc/systemd/journald.conf.d
     systemd-tmpfiles --create --prefix /var/log/journal
-    sed -i 's/^#\?Storage=.*/Storage=persistent/' /etc/systemd/journald.conf
+    cat > /etc/systemd/journald.conf.d/persistent-storage.conf <<'EOF'
+[Journal]
+Storage=persistent
+EOF
     systemctl restart systemd-journald
     echo "    Persistent journal enabled."
 

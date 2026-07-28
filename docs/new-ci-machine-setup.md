@@ -52,6 +52,11 @@ sudo ./scripts/machine-init.sh packages runner-user services
 
 ### 2. Vault setup
 
+**This step only applies to the one designated central Vault host (currently
+`osac-ci-1`).** Every other fleet machine (which is what you're setting up if
+you're following this doc for a new machine) should skip straight to
+"2b. Vault setup for additional hosts (agent mode)" below.
+
 Switch to the `github-runner` user and run the Vault setup script:
 
 ```bash
@@ -71,6 +76,39 @@ After completion:
 
 1. **Back up** `~/.vault-server/.vault-init.json` securely (copy it off the machine)
 2. **Verify** with `vault/scripts/vault-health-check.sh`
+
+### 2b. Vault setup for additional hosts (agent mode)
+
+Every fleet host other than the central one needs to be a Vault **agent**: it
+tunnels via SSH into the central Vault and fetches its own AppRole
+`role-id`/`secret-id`. As `github-runner`:
+
+```bash
+cd osac-test-infra
+export VAULT_TOKEN='<central vault root token>'   # from the central host's ~/.vault-server/.vault-init.json
+./vault/scripts/vault-setup.sh --agent osac-ci-1.redhat.com
+```
+
+**Before running this**, make sure `osac-ci-1.redhat.com` resolves to the
+central host's **public** IP in this machine's `/etc/hosts` (check an
+existing agent host's `/etc/hosts` for the entry to copy) -- not its private
+IP. This fleet relies
+on manually-synced `/etc/hosts` entries for inter-host name resolution rather
+than real DNS, and osac-ci-1 in particular sits in a **different IBM Cloud
+account and datacenter** than the rest of the fleet. The private cross-account
+network path between them has been observed to silently block *new* SSH
+connections (existing tunnels keep working, but a fresh one will hang and
+eventually fail in Phase 4 waiting for the tunnel) -- every existing agent
+host already points at osac-ci-1's public IP for exactly this reason. The
+script itself will fail fast in a preflight check with a pointer to this if
+`osac-ci-1.redhat.com` doesn't resolve to something reachable.
+
+After completion, verify with `vault/scripts/vault-health-check.sh` -- note
+that in agent mode, several checks (JWT auth method, `osac-e2e` role/policy,
+KV v2 engine, AppRole auth method) will show `[FAIL]` because they query Vault
+admin endpoints that require a root token, which agents don't have. That's
+expected; the checks that matter for an agent are "AppRole credentials
+present", "AppRole login succeeds", and the `vault-tunnel.service` checks.
 
 ### 3. Migrate secrets from an existing Vault
 
