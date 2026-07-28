@@ -88,7 +88,10 @@ fi
 
 echo ""
 
-# Create runners
+# Create runners. NUM_RUNNERS is the *target total* (1..N), not an
+# increment -- re-running with a higher count (e.g. going from 5 to 10) must
+# leave already-registered, already-running runners untouched rather than
+# rm -rf'ing their directory out from under a live systemd service.
 for i in $(seq 1 "$NUM_RUNNERS"); do
     RUNNER_NAME="${HOST_PREFIX}-${RUNNER_NAME_PREFIX}-$(printf "%02d" "$i")"
     RUNNER_DIR="$BASE_DIR/${RUNNER_NAME_PREFIX}-$i"
@@ -96,7 +99,15 @@ for i in $(seq 1 "$NUM_RUNNERS"); do
     echo -e "${BOLD}--- Setting up $RUNNER_NAME ($i/$NUM_RUNNERS) ---${RESET}"
 
     if [ -d "$RUNNER_DIR" ]; then
-        echo -e "${YELLOW}Removing existing runner directory...${RESET}"
+        if [ -f "$RUNNER_DIR/.service" ] && systemctl is-active --quiet "$(cat "$RUNNER_DIR/.service")" 2>/dev/null; then
+            echo -e "${GREEN}$RUNNER_NAME is already registered and running, skipping${RESET}"
+            echo ""
+            continue
+        fi
+
+        echo -e "${YELLOW}Removing existing (inactive) runner directory...${RESET}"
+        (cd "$RUNNER_DIR" && sudo ./svc.sh stop 2>/dev/null || true)
+        (cd "$RUNNER_DIR" && sudo ./svc.sh uninstall 2>/dev/null || true)
         rm -rf "$RUNNER_DIR"
     fi
 

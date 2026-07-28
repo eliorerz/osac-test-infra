@@ -63,6 +63,22 @@ sudo journalctl -u 'actions.runner.osac-project-*' -f
 # https://github.com/organizations/osac-project/settings/actions/runners
 ```
 
+## Adding More Runners to an Existing Machine
+
+`NUM_RUNNERS` is the **target total**, not an increment. To go from 5 runners to
+10 on a machine that already has `runner-01..05` registered and running, get a
+fresh token and re-run with the new total:
+
+```bash
+./scripts/runners/action-runners-setup.sh <TOKEN> 10
+```
+
+The script detects any runner directory whose systemd service is already
+active and leaves it untouched (no re-download, no re-config, no service
+restart) -- it only sets up the new indices (`06..10` in this example). This
+makes the script safe to re-run at any time to reconcile a machine up to a
+given runner count.
+
 ## Runner Configuration
 
 - **Labels:** `self-hosted`, `osac-ci`
