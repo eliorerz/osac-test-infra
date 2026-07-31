@@ -15,11 +15,18 @@
 # The optional third argument is the containerfile path used to build this
 # component (e.g. "Containerfile" for a standalone single-component repo, or
 # "fulfillment-service/Containerfile" when the component is built from a
-# monorepo checkout). When it has a directory component, that directory name
-# both identifies which submodule to replace (COMPONENT_REPO_NAME alone can't,
-# since a monorepo caller passes the same repo name, e.g. "osac-project/osac",
-# for every component it builds) and scopes the copy to that subdirectory of
-# <component-src-dir> instead of the whole checkout.
+# monorepo checkout). When it has a directory component, its FIRST path
+# segment (not the full dirname) both identifies which submodule to replace
+# (COMPONENT_REPO_NAME alone can't, since a monorepo caller passes the same
+# repo name, e.g. "osac-project/osac", for every component it builds) and
+# scopes the copy to that subdirectory of <component-src-dir> instead of the
+# whole checkout. A containerfile can be nested more than one level deep
+# within a component (e.g.
+# "osac-aap/execution-environment/execution-environment.yaml") -- the first
+# segment is always the component's own top-level directory, which is what
+# belongs in the submodule; using the full dirname there would both miss the
+# SUBMODULE_MAP entry and copy only that nested subdirectory instead of the
+# whole component.
 
 set -euo pipefail
 
@@ -33,7 +40,7 @@ fi
 
 COMPONENT_SUBDIR=""
 if [[ "${COMPONENT_CONTAINERFILE}" == */* ]]; then
-  COMPONENT_SUBDIR="$(dirname "${COMPONENT_CONTAINERFILE}")"
+  COMPONENT_SUBDIR="${COMPONENT_CONTAINERFILE%%/*}"
   REPO_NAME="${COMPONENT_SUBDIR}"
 else
   REPO_NAME="${COMPONENT_REPO_NAME##*/}"
