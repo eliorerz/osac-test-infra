@@ -481,6 +481,19 @@ jobs:
             export PATH="${YQ_DIR}:${PATH}"
             echo "${YQ_DIR}" >> "$GITHUB_PATH"
           fi
+          # Needed by "Install OSAC"'s post-rollout gRPC readiness check below.
+          # Fleet machines install this already (scripts/machine-init.sh
+          # grpcurl), but match e2e-vmaas-full-install.yml's own defensive
+          # fallback rather than assuming every runner has been re-provisioned.
+          if ! command -v grpcurl &>/dev/null; then
+            GRPCURL_VERSION="1.9.1"
+            GRPCURL_DIR="${RUNNER_TEMP}/bin"
+            mkdir -p "${GRPCURL_DIR}"
+            curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" \
+              | tar xz -C "${GRPCURL_DIR}" grpcurl
+            export PATH="${GRPCURL_DIR}:${PATH}"
+            echo "${GRPCURL_DIR}" >> "$GITHUB_PATH"
+          fi
 
           INSTALLER_DIR="$RUNNER_TEMP/osac-installer"
           git clone --recurse-submodules --depth 1 --branch "${INSTALLER_REF}" \
@@ -569,6 +582,37 @@ jobs:
               "${SET_ARGS[@]}" \
               --timeout 10m \
               --wait
+
+            # helm --wait only confirms the *new* pod/ReplicaSet is Ready -- it
+            # does not wait for the old pod to finish terminating or for the
+            # Service/route's endpoint list to fully converge, so a caller
+            # right after this (e.g. setup-caas-agents.sh registering the
+            # ci-worker host type) can race a stale or not-yet-routable
+            # backend and get a transient 503 from the gateway. Same fix as
+            # e2e-vmaas-full-install.yml's equivalent step (OSAC-2528) --
+            # confirm every Deployment has actually finished rolling out,
+            # then confirm the real external gRPC endpoint is reachable
+            # before proceeding.
+            echo "Waiting for rollout to complete..."
+            for deploy in $(oc get deploy -n "${INSTALLER_NAMESPACE}" -o name); do
+              oc rollout status "${deploy}" -n "${INSTALLER_NAMESPACE}" --timeout=300s
+            done
+
+            DOMAIN=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')
+            GRPC_ADDR="fulfillment-internal-api-${INSTALLER_NAMESPACE}.${DOMAIN}:443"
+            echo "Waiting for gRPC endpoint ${GRPC_ADDR} to be reachable..."
+            for i in $(seq 1 30); do
+              if grpcurl -insecure "${GRPC_ADDR}" grpc.health.v1.Health/Check; then
+                echo "gRPC endpoint reachable (attempt ${i})"
+                break
+              fi
+              if [ "${i}" -eq 30 ]; then
+                echo "gRPC endpoint not reachable after 30 attempts"
+                exit 1
+              fi
+              echo "Attempt ${i}/30 failed, retrying in 2s..."
+              sleep 2
+            done
           fi
 
           # Configure CaaS domain (after image overrides so helm upgrade cannot overwrite)
