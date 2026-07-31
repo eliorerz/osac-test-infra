@@ -53,12 +53,16 @@ reap_domain() {
         log "  DRY_RUN: would destroy/undefine ${name}"
         return 0
     fi
-    ${VIRSH} destroy "${name}" 2>/dev/null || true
-    ${VIRSH} undefine "${name}" 2>/dev/null || true
+    ${VIRSH} destroy "${name}" || true
+    ${VIRSH} undefine "${name}" || true
 }
 
 # --- CaaS agent VMs and their single-node cluster VMs ---
-mapfile -t DOMAINS < <(${VIRSH} list --all --name 2>/dev/null \
+if ! all_domains="$(${VIRSH} list --all --name 2>&1)"; then
+    log "ERROR: unable to query qemu:///system domains: ${all_domains}"
+    exit 1
+fi
+mapfile -t DOMAINS < <(printf '%s\n' "${all_domains}" \
     | grep -E '^agent-[a-zA-Z0-9]+-caas$|^test-infra-cluster-[a-zA-Z0-9]+-caas-master-[0-9]+$' || true)
 
 for domain in "${DOMAINS[@]}"; do
@@ -74,9 +78,13 @@ if [[ -d "${STORAGE_DIR}" ]]; then
         base=$(basename "${f}")
         vm_name="${base%.qcow2}"
         vm_name="${vm_name%-discovery.iso}"
-        if ! ${VIRSH} dominfo "${vm_name}" &>/dev/null; then
-            log "Removing orphaned disk file with no matching domain: ${f}"
-            [[ "${DRY_RUN}" == "true" ]] || rm -f "${f}"
+        if ! grep -Fqx -- "${vm_name}" <<<"${all_domains}"; then
+            if [[ "${DRY_RUN}" == "true" ]]; then
+                log "DRY_RUN: would remove orphaned disk file: ${f}"
+            else
+                log "Removing orphaned disk file with no matching domain: ${f}"
+                rm -f "${f}"
+            fi
         fi
     done < <(find "${STORAGE_DIR}" -maxdepth 1 -type f \
         \( -name 'agent-*-caas.qcow2' -o -name 'agent-*-caas-discovery.iso' \) \
