@@ -24,13 +24,16 @@ RUN set -euo pipefail; \
     else \
       rm -f /tmp/osac-cli-candidate; \
       if [ -z "${OSAC_VERSION}" ]; then \
-        OSAC_VERSION=$(curl -Lsf "https://api.github.com/repos/osac-project/osac/releases?per_page=100" | jq -r '[.[] | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))][0].tag_name // empty | ltrimstr("v")'); \
-        [ -n "${OSAC_VERSION}" ] || { echo "ERROR: no fulfillment-service release (bare vX.Y.Z tag) found on osac-project/osac"; exit 1; }; \
+        OSAC_TAG=$(curl -Lsf "https://api.github.com/repos/osac-project/osac/releases?per_page=100" | jq -r '[.[] | select(.tag_name | test("^fulfillment-service/v[0-9]+\\.[0-9]+\\.[0-9]+$"))][0].tag_name // empty'); \
+        [ -n "${OSAC_TAG}" ] || { echo "ERROR: no fulfillment-service release (fulfillment-service/vX.Y.Z tag) found on osac-project/osac"; exit 1; }; \
+        OSAC_VERSION="${OSAC_TAG#fulfillment-service/v}"; \
         echo "Resolved latest OSAC CLI version: ${OSAC_VERSION}"; \
+      else \
+        OSAC_TAG="fulfillment-service/v${OSAC_VERSION}"; \
       fi; \
-      curl -Lsfo /usr/local/bin/osac "https://github.com/osac-project/osac/releases/download/v${OSAC_VERSION}/osac_Linux_x86_64" \
+      curl -Lsfo /usr/local/bin/osac "https://github.com/osac-project/osac/releases/download/${OSAC_TAG}/osac_Linux_x86_64" \
         || { echo "ERROR: osac binary download failed"; exit 1; }; \
-      curl -Lsfo /tmp/checksums.txt "https://github.com/osac-project/osac/releases/download/v${OSAC_VERSION}/osac_${OSAC_VERSION}_checksums.txt" \
+      curl -Lsfo /tmp/checksums.txt "https://github.com/osac-project/osac/releases/download/${OSAC_TAG}/osac_${OSAC_VERSION}_checksums.txt" \
         || { echo "ERROR: checksums file download failed"; exit 1; }; \
       line="$(grep -E '[[:space:]]osac_Linux_x86_64$' /tmp/checksums.txt || true)"; \
       [ -n "$line" ] || { echo "ERROR: osac_Linux_x86_64 entry not found in checksums file"; exit 1; }; \

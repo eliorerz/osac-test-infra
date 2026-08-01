@@ -417,20 +417,25 @@ install_osac() {
         return 0
     fi
 
+    local tag=""
+
     # Use env var if set, otherwise fetch latest release tag from GitHub
     if [[ -z "${version}" ]]; then
         echo "    Detecting latest fulfillment-service release..."
         # osac-project/osac now hosts releases for multiple components (each
         # tagged <component>/vX.Y.Z per OSAC-3467), so following
         # releases/latest's redirect can land on a different component's
-        # release -- filter explicitly for fulfillment-service's own bare
-        # vX.Y.Z tag via the releases list instead.
-        version=$(curl -sfL "https://api.github.com/repos/osac-project/osac/releases?per_page=100" \
-            | jq -r '[.[] | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))][0].tag_name // empty | ltrimstr("v")')
-        [[ -n "${version}" ]] || { echo "ERROR: no fulfillment-service release (bare vX.Y.Z tag) found on osac-project/osac" >&2; exit 1; }
+        # release -- filter explicitly for fulfillment-service's own
+        # fulfillment-service/vX.Y.Z tag via the releases list instead.
+        tag=$(curl -sfL "https://api.github.com/repos/osac-project/osac/releases?per_page=100" \
+            | jq -r '[.[] | select(.tag_name | test("^fulfillment-service/v[0-9]+\\.[0-9]+\\.[0-9]+$"))][0].tag_name // empty')
+        [[ -n "${tag}" ]] || { echo "ERROR: no fulfillment-service release (fulfillment-service/vX.Y.Z tag) found on osac-project/osac" >&2; exit 1; }
+        version="${tag#fulfillment-service/v}"
+    else
+        tag="fulfillment-service/v${version}"
     fi
 
-    local url="https://github.com/osac-project/osac/releases/download/v${version}/osac_Linux_x86_64"
+    local url="https://github.com/osac-project/osac/releases/download/${tag}/osac_Linux_x86_64"
     echo "    Downloading osac v${version} from ${url}..."
     curl -fL -o /usr/local/bin/osac "${url}" \
         || { echo "ERROR: failed to download osac v${version}" >&2; exit 1; }
