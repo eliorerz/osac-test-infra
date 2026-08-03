@@ -6,6 +6,7 @@ self-hosted-runner:
     - osac-ci
     - monitoring-central
     - osac-ci-orchestrator
+    - osac-ci-small
 
 paths:
   .github/workflows/**/*.yml:
