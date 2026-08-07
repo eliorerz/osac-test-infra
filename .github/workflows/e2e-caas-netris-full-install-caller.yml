@@ -5,8 +5,6 @@ permissions:
   contents: read
 
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       instance-type:
@@ -46,8 +44,8 @@ on:
         default: ""
 
 concurrency:
-  group: e2e-caas-netris-full-install-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: e2e-caas-netris-full-install-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   e2e-caas-netris:
