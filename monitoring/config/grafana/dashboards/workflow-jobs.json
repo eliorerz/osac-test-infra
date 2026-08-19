@@ -468,7 +468,7 @@
       },
       "targets": [
         {
-          "expr": "increase(github_actions_failed_step_total[$__rate_interval])",
+          "expr": "sum by (step) (increase(github_actions_failed_step_total[$__rate_interval]))",
           "legendFormat": "{{ step }}",
           "refId": "A"
         }

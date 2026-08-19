@@ -157,32 +157,100 @@ class WorkflowExporter:
     # "test" (see _classify_failure_reason).
     TEST_STEPS = frozenset({
         "Install OSAC",
+        "Install infrastructure operators",
         "Deploy OSAC (make deploy-osac)",
         "Deploy OSAC from snapshot (make deploy-osac)",
         "Run E2E tests",
         "Run CaaS e2e tests",
     })
 
+    # Suffix used by pure pass-through relay jobs/workflows that exist only
+    # to give the merge-queue ruleset a stable required-check name -- e.g.
+    # "label-gate" (a whole workflow) and "e2e-caas-gate" (one job within a
+    # bigger e2e workflow, alongside the real "e2e-caas-full-install" job).
+    # Neither adds test/infra signal of its own: a job-level gate's only
+    # step is "if an upstream job failed, exit 1", which would otherwise
+    # misclassify as failure_reason "infra" (it never matches TEST_STEPS)
+    # even when the real failure was already correctly classified from the
+    # actual e2e job in the same run; a workflow-level gate like
+    # "label-gate" is almost always a trivial auto-pass on merge_group and
+    # a real-but-unrelated label check on pull_request, neither of which is
+    # "CI health" signal worth counting.
+    GATE_NAME_SUFFIX = "-gate"
+
+    # Other known plumbing jobs that precede the real e2e job within each
+    # e2e-*-full-install run (see osac/.github/workflows/e2e-*-full-install.yml)
+    # but don't follow the "-gate" suffix convention: "changes" (dorny/paths-filter
+    # precondition -- should the expensive e2e job run at all) and
+    # "e2e-readiness" (fleet/capacity precondition). A failure here means a
+    # precondition wasn't met, not that OSAC itself broke -- when
+    # "e2e-readiness" fails, the real e2e job is skipped entirely (confirmed
+    # live), so there's no product signal to attribute the failure to.
+    # A small, stable, explicit list rather than a broader substring guess,
+    # for the same reason TEST_STEPS above is a small allowlist rather than
+    # an ever-growing denylist of infra step names.
+    GATE_JOB_NAMES = frozenset({"changes", "e2e-readiness"})
+
     @staticmethod
-    def _classify_failure_reason(category, failed_steps):
+    def _is_gate_name(name):
+        """Whole-workflow gate check (e.g. "label-gate") -- suffix only."""
+        return (name or "").lower().endswith(WorkflowExporter.GATE_NAME_SUFFIX)
+
+    @staticmethod
+    def _is_gate_job(name):
+        """Job-level gate/precondition check within a bigger workflow run --
+        suffix match (e.g. "e2e-caas-gate") or one of GATE_JOB_NAMES.
+        """
+        lname = (name or "").lower()
+        return lname.endswith(WorkflowExporter.GATE_NAME_SUFFIX) or lname in WorkflowExporter.GATE_JOB_NAMES
+
+    @staticmethod
+    def _is_gate_only_failure(jobs):
+        """True if every FAILED job in this run's job list is a gate/
+        precondition job (see _is_gate_job) -- i.e. "e2e-readiness" (or
+        another precondition) failed, the real e2e job was never even
+        started (GitHub reports it "skipped"), and the only "failure"
+        conclusions in the whole run belong to gate jobs relaying that
+        upstream skip (confirmed live: osac run 32196167957 -- changes:
+        success, e2e-readiness: failure, e2e-vmaas-gate: failure,
+        e2e-vmaas-full-install: skipped). Nothing broke (not infra) and
+        nothing ran (not test) -- there's no e2e signal in this run at all.
+        """
+        failed_jobs = [j for j in (jobs or []) if j.get("conclusion") == "failure"]
+        if not failed_jobs:
+            return False
+        return all(WorkflowExporter._is_gate_job(j.get("name")) for j in failed_jobs)
+
+    @staticmethod
+    def _classify_failure_reason(category, failed_steps, jobs=None):
         """category: only "e2e" jobs get classified. Returns "n/a" for
         any other category.
 
         failed_steps: the list from _extract_failed_steps
-        ([{"display":.., "step":..}, ...]). Returns "test" if any failed
-        step is in TEST_STEPS (OSAC's own install/test execution), "infra"
-        if there's failure detail but none of it is a test step, and
-        "infra" too when there's no per-step detail at all (e.g. the job
-        itself shows conclusion "cancelled" with zero recorded steps even
-        though the run's overall conclusion is "failure" -- a real
-        observed case: a runner-level crash/timeout that GitHub cancelled
-        mid-job). A genuine product/test failure always produces step-
-        level data (a red "Run E2E tests" step); the total absence of any
-        step data is itself an infra-level symptom, not an ambiguous
-        third category.
+        ([{"display":.., "step":..}, ...]), already excluding gate/
+        precondition jobs (see _is_gate_job). jobs: the raw per-job list
+        from _fetch_run_jobs, used only to detect the gate-only-failure
+        case below -- pass None when unavailable (e.g. reclassifying from
+        already-stored text) to skip that check.
+
+        Returns "gate" if every job that actually failed was a gate/
+        precondition job (see _is_gate_only_failure) -- excluded from all
+        stats by get_jobs_json, not just this infra/test breakdown, since
+        it's neither. Otherwise "test" if any failed step is in TEST_STEPS
+        (OSAC's own install/test execution), "infra" if there's failure
+        detail but none of it is a test step, and "infra" too when there's
+        no per-step detail at all (e.g. the job itself shows conclusion
+        "cancelled" with zero recorded steps even though the run's overall
+        conclusion is "failure" -- a real observed case: a runner-level
+        crash/timeout that GitHub cancelled mid-job). A genuine product/
+        test failure always produces step-level data (a red "Run E2E
+        tests" step); the total absence of any step data is itself an
+        infra-level symptom, not an ambiguous third category.
         """
         if category != "e2e":
             return "n/a"
+        if jobs is not None and WorkflowExporter._is_gate_only_failure(jobs):
+            return "gate"
         if not failed_steps:
             return "infra"
         for f in failed_steps:
@@ -353,6 +421,19 @@ class WorkflowExporter:
         _recategorize_jobs_if_needed for WORKFLOW_CATEGORIES. Safe to
         re-run every startup: no-op once every failed row already matches
         what _classify_failure_reason would assign today.
+
+        The live-jobs list _classify_failure_reason optionally uses to
+        detect a gate-only failure (see _is_gate_only_failure) isn't
+        available here -- only the flattened text is stored, not each
+        job's raw conclusion. Approximated instead from the stored
+        "job -> step" entries themselves: if every entry's job name is a
+        gate job (rows recorded before the ingestion-time gate filter
+        existed still have these), it's a gate-only failure by the same
+        definition. Rows recorded after that filter existed have an empty
+        failed_step for a true gate-only failure (the entries were already
+        dropped before storage) and fall back to the ordinary infra/test
+        split below -- a known, narrow gap for the short window between
+        that filter shipping and this detection being added.
         """
         with self._db() as conn:
             rows = conn.execute(
@@ -361,12 +442,14 @@ class WorkflowExporter:
             ).fetchall()
             updated = 0
             for row in rows:
-                steps = [
-                    {"step": entry.split(" → ")[-1]}
-                    for entry in (row["failed_step"] or "").split("; ")
-                    if entry
-                ]
-                reason = self._classify_failure_reason(row["category"], steps)
+                entries = [e for e in (row["failed_step"] or "").split("; ") if e]
+                if row["category"] == "e2e" and entries and all(
+                    self._is_gate_job(entry.split(" → ")[0]) for entry in entries
+                ):
+                    reason = "gate"
+                else:
+                    steps = [{"step": entry.split(" → ")[-1]} for entry in entries]
+                    reason = self._classify_failure_reason(row["category"], steps)
                 if reason != row["failure_reason"]:
                     conn.execute(
                         "UPDATE jobs SET failure_reason = ? WHERE id = ?", (reason, row["id"])
@@ -1196,6 +1279,8 @@ class WorkflowExporter:
         """
         failed_steps = []
         for job in jobs:
+            if self._is_gate_job(job.get("name")):
+                continue
             if job.get("conclusion") != "failure":
                 continue
             for step in job.get("steps", []):
@@ -1214,6 +1299,8 @@ class WorkflowExporter:
         """
         steps = []
         for job in jobs:
+            if self._is_gate_job(job.get("name")):
+                continue
             if job.get("conclusion") not in ("success", "failure"):
                 continue
             for step in job.get("steps", []):
@@ -1319,7 +1406,7 @@ class WorkflowExporter:
                     # unset; _classify_failure_reason treats "no per-step
                     # detail at all" as infra, which is correct here too.
                     failed = self._extract_failed_steps(jobs or [])
-                    record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed)
+                    record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed, jobs)
                     if failed:
                         record["failed_step"] = "; ".join(
                             f["display"] for f in failed
@@ -1393,7 +1480,7 @@ class WorkflowExporter:
                 # _classify_failure_reason treats "no per-step detail at
                 # all" as infra, which is correct here too.
                 failed = self._extract_failed_steps(jobs or [])
-                record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed)
+                record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed, jobs)
                 if failed:
                     record["failed_step"] = "; ".join(f["display"] for f in failed)
             if self._upsert_job(record):
@@ -1483,7 +1570,7 @@ class WorkflowExporter:
                         # treats "no per-step detail at all" as infra,
                         # which is correct here too.
                         failed = self._extract_failed_steps(jobs or [])
-                        record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed)
+                        record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed, jobs)
                         if failed:
                             record["failed_step"] = "; ".join(
                                 f["display"] for f in failed
@@ -1558,7 +1645,7 @@ class WorkflowExporter:
                         # treats "no per-step detail at all" as infra,
                         # which is correct here too.
                         failed = self._extract_failed_steps(jobs or [])
-                        record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed)
+                        record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed, jobs)
                         if failed:
                             record["failed_step"] = "; ".join(
                                 f["display"] for f in failed
@@ -1735,6 +1822,21 @@ class WorkflowExporter:
         # -- DB-backed completed-job history -----------------------------
         where = []
         args = {"limit": limit}
+        # Whole-workflow gates (e.g. "label-gate") add no CI-health signal
+        # of their own -- excluded from every stats consumer of this
+        # method unconditionally, not behind an opt-in filter, since
+        # there's no legitimate reason to count them. Job-level gates
+        # (e.g. "e2e-caas-gate", one job within a bigger e2e workflow) are
+        # handled separately in _extract_failed_steps/_extract_step_durations,
+        # since they're not their own row here.
+        where.append("LOWER(workflow) NOT LIKE '%' || :gate_suffix")
+        args["gate_suffix"] = WorkflowExporter.GATE_NAME_SUFFIX
+        # Gate-only failures (failure_reason "gate", see
+        # _is_gate_only_failure): a precondition like "e2e-readiness"
+        # failed and the real e2e job never ran, so there's no e2e signal
+        # here at all -- excluded unconditionally, same as the
+        # whole-workflow gate filter above, no opt-in override.
+        where.append("LOWER(failure_reason) != 'gate'")
         if failure_reason_filter:
             # Picking a failure reason implies "only failures" -- the same
             # effect as also picking status=failure. Takes precedence over
@@ -2141,11 +2243,18 @@ class WorkflowExporter:
         names = sorted(set(j.get("workflow", "unknown") for j in jobs))
         return [{"workflow": n, "__text": n, "__value": n} for n in names]
 
+    # Below this fraction of the total, a "Most Failing Steps" entry is
+    # folded into a single "Other" slice instead of its own -- with dozens
+    # of distinct "job -> step" combinations across e2e flavors, a
+    # piechart/legend listing every single-digit-count step is unreadable.
+    FAILED_STEPS_OTHER_THRESHOLD = 0.10
+
     def get_failed_steps_json(self, params):
         """Return failure counts by step name for jobs matching the filters.
 
         Parses the 'failed_step' field (semicolon-separated "job -> step" entries)
-        from each matching failed job.
+        from each matching failed job. Entries below FAILED_STEPS_OTHER_THRESHOLD
+        of the total are combined into a single "Other" entry.
 
         Returns: [{"step": "step_name", "count": N}, ...] sorted by count desc.
         """
@@ -2159,8 +2268,18 @@ class WorkflowExporter:
                 entry = entry.strip()
                 if entry:
                     step_counts[entry] = step_counts.get(entry, 0) + 1
-        result = [{"step": s, "count": c} for s, c in step_counts.items()]
-        return sorted(result, key=lambda x: -x["count"])
+
+        total = sum(step_counts.values())
+        main = []
+        other_count = 0
+        for step, count in step_counts.items():
+            if total and count / total >= self.FAILED_STEPS_OTHER_THRESHOLD:
+                main.append({"step": step, "count": count})
+            else:
+                other_count += count
+        if other_count:
+            main.append({"step": "Other", "count": other_count})
+        return sorted(main, key=lambda x: -x["count"])
 
     # Maps event names back to human-readable job type labels
     EVENT_TYPE_LABELS = {
