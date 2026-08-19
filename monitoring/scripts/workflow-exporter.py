@@ -2394,14 +2394,23 @@ class WorkflowExporter:
         Returns: {"success": N, "failure": N, "cancelled": N,
                   "queued": N, "in_progress": N, "total": N,
                   "failure_rate": 0.xx, "success_rate": 0.xx,
+                  "infra_failure_count": N, "infra_failure_pct": 0.xx,
                   "cache_oldest_at": "2026-..." | None}
         """
         # Reuse the same filtering logic — just count instead of return
         jobs = self.get_jobs_json(params)
         counts = {}
+        infra_failure_count = 0
         for job in jobs:
             c = job.get("conclusion") or job.get("status", "unknown")
             counts[c] = counts.get(c, 0) + 1
+            # get_jobs_json already excludes failure_reason "gate" rows
+            # (see _is_gate_only_failure) -- a gate-only failure has no
+            # e2e signal at all, so it's correctly absent from both this
+            # count and the failure_count denominator below, not silently
+            # folded into "infra".
+            if job.get("failure_reason") == "infra":
+                infra_failure_count += 1
         total = len(jobs)
         success_count = counts.get("success", 0)
         failure_count = counts.get("failure", 0)
@@ -2420,6 +2429,12 @@ class WorkflowExporter:
             # two rates always sum to exactly 1 (avoids float rounding
             # drift between two separately-rounded fractions).
             "success_rate": round(1 - failure_rate, 4) if decisive > 0 else 0,
+            "infra_failure_count": infra_failure_count,
+            # Of all failures (not of all runs) -- "what fraction of the
+            # failures we did have were CI's fault rather than the
+            # product's", distinct from failure_rate itself (which is
+            # fraction of all decisive runs that failed at all).
+            "infra_failure_pct": round(infra_failure_count / failure_count, 4) if failure_count > 0 else 0,
             # How far back the exporter's in-memory data actually goes,
             # regardless of the query's own filters -- lets the dashboard
             # show "data since: X" instead of implying full coverage of
