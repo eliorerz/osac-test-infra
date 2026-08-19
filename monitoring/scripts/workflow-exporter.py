@@ -1836,7 +1836,16 @@ class WorkflowExporter:
         # failed and the real e2e job never ran, so there's no e2e signal
         # here at all -- excluded unconditionally, same as the
         # whole-workflow gate filter above, no opt-in override.
-        where.append("LOWER(failure_reason) != 'gate'")
+        # NOT `LOWER(failure_reason) != 'gate'` -- failure_reason is NULL
+        # for every non-failure row (success/cancelled/skipped never set
+        # it, see the ingestion code), and SQL's three-valued NULL logic
+        # makes any comparison against NULL evaluate to NULL, not TRUE --
+        # a bare `!=` here silently excluded the entire table except the
+        # ~7k rows that happen to have a real failure_reason, making every
+        # dashboard look like "100% failures" (confirmed live in
+        # production immediately after this shipped). COALESCE first so
+        # NULL rows compare as '' (never equal to 'gate') and pass through.
+        where.append("COALESCE(LOWER(failure_reason), '') != 'gate'")
         if failure_reason_filter:
             # Picking a failure reason implies "only failures" -- the same
             # effect as also picking status=failure. Takes precedence over
