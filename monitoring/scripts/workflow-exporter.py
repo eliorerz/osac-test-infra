@@ -2471,7 +2471,22 @@ class WorkflowExporter:
                 for entry in (job.get("failed_step") or "").split("; "):
                     if not entry:
                         continue
-                    step = entry.split(" → ")[-1]
+                    parts = entry.split(" → ")
+                    step = parts[-1]
+                    # Rows stored before the ingestion-time gate-job filter
+                    # existed (see _extract_failed_steps) still carry the
+                    # gate job's own relay step ("e2e-*-gate → Run echo
+                    # ...") alongside the real failing job's entry in the
+                    # same failed_step text -- confirmed live, e.g. run
+                    # #32186127810's stored text has both "e2e-caas-full-install
+                    # / e2e → Build and load component images" AND
+                    # "e2e-caas-gate → Run echo ...". failure_reason for
+                    # that row is correctly "infra" either way (the real
+                    # entry alone decides it), but this per-step breakdown
+                    # would otherwise also count the noise entry as if it
+                    # were its own distinct infra cause.
+                    if len(parts) > 1 and self._is_gate_job(parts[0]):
+                        continue
                     if step not in self.TEST_STEPS:
                         infra_by_step[step] = infra_by_step.get(step, 0) + 1
             elif reason == "test":
