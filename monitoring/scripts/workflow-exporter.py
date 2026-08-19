@@ -121,15 +121,23 @@ api_remaining = Gauge(
 # ---------------------------------------------------------------------------
 class WorkflowExporter:
     # Ordered category mapping — first match wins (case-insensitive substring).
-    # automation and release are both checked before the broad "ci" catch-all
-    # (test/check/build): automation so bot-maintenance workflows like
+    # automation is checked before BOTH "e2e" and the broad "ci" catch-all
+    # (test/check/build): before ci so bot-maintenance workflows like
     # "Remove ok-to-test on new push" don't get caught by ci's "test"
-    # pattern, release so "Build container image" matches "container image"
-    # instead of ci's generic "build" pattern.
+    # pattern, and before e2e so bot workflows that merely reference e2e
+    # without running it don't get caught by e2e's bare "e2e" substring --
+    # confirmed live: "E2E on CodeRabbit approval" (kicks off the real e2e
+    # workflows via the GitHub API, runs none itself), "Remove e2e-ready
+    # label on new push" (label housekeeping), and "Scan E2E logs" (log
+    # retention) were all miscategorized "e2e" and polluting e2e pass-rate/
+    # infra-failure stats with runs that never executed a single real test.
+    # release is checked before ci too, so "Build container image" matches
+    # "container image" instead of ci's generic "build" pattern.
     WORKFLOW_CATEGORIES = {
+        "automation": ["bump", "dependabot", "copilot", "slash", "ok-to-test",
+                       "coderabbit approval", "e2e-ready label", "scan e2e logs"],
         "e2e":        ["e2e"],
         "lint":       ["pre-commit", "lint", "checklist", "kustomize", "check image"],
-        "automation": ["bump", "dependabot", "copilot", "slash", "ok-to-test"],
         "release":    ["publish", "container image", "mirror"],
         "ci":         ["ci", "test", "check", "build"],
     }
@@ -1923,6 +1931,13 @@ class WorkflowExporter:
         # so they never displace history.
         if include_active:
             def matches_active(job):
+                # Same unconditional whole-workflow-gate exclusion as the
+                # SQL-backed branch above -- without this, a queued/
+                # in-progress run of e.g. "label-gate" would appear here
+                # (the ?active=true path) even though it's excluded from
+                # every completed-history query.
+                if WorkflowExporter._is_gate_name(job.get("workflow")):
+                    return False
                 if failure_reason_filter:
                     # Active (queued/in_progress) jobs are never
                     # conclusion == "failure" yet -- same precedence as
