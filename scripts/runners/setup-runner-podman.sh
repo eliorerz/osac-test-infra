@@ -201,6 +201,30 @@ EOF
 [Service]
 Environment="CONTAINERS_STORAGE_CONF=${STORAGE_CONF}"
 EOF
+
+            # Pre-warm the new graphroot/runroot now, as github-runner, so
+            # the DB and directory tree already exist before this runner's
+            # first real job ever touches them. Skipping this left a real
+            # window open: a runner's first build after picking up this
+            # config failed live with "RunRoot is pointing to a path
+            # (/run/containers/storage) which is not writable" -- podman
+            # fell back to the rootful default path instead of honoring
+            # this file, on first-ever use of a brand new storage location.
+            # Manually running `podman info` under the same env correctly
+            # initialized it and a subsequent run succeeded, so pre-warming
+            # here (before any job can race the first initialization)
+            # closes the gap without needing to fully root-cause podman's
+            # internal fallback trigger.
+            #
+            # `su -` (a real login shell, going through PAM/pam_systemd),
+            # not `runuser -u` -- confirmed live that runuser fails outright
+            # with "error opening namespace handles: Permission denied"
+            # here, since it doesn't establish the session/cgroup context
+            # rootless podman needs; `su -` does, matching how an actual
+            # SSH login to this user already works.
+            su - github-runner -c "env CONTAINERS_STORAGE_CONF='${STORAGE_CONF}' podman info" >/dev/null 2>&1 || \
+                warn "  Failed to pre-warm podman storage for ${service} -- its first real job may hit the same race"
+
             info "  Isolated podman storage: ${RUNNER_DIR}/podman-storage"
         else
             warn "  Could not determine WorkingDirectory for ${service} -- skipping storage isolation"
