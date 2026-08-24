@@ -45,6 +45,19 @@ name: Fleet podman image cleanup
 # live: this included node-exporter, meant to run for weeks). The reap
 # step below filters on Command=="buildah" + Status=="Storage" as well
 # as age for exactly this reason.
+#
+# Host matrix is generated from fleet/inventory/hosts.yml's ci_runners
+# group (see the generate-matrix job below), not hardcoded here -- a
+# hardcoded list previously went stale for 11+ days when the fleet grew
+# from 11 to 16 hosts (osac-11..15 added, never added to this workflow),
+# during which those 5 hosts accumulated 270-310GB of unpruned dangling
+# podman images each (confirmed live, one host up to 73% disk usage)
+# with zero local cleanup mechanism of any kind -- there never was a
+# per-machine timer/cron for this; it has only ever run here. Generating
+# from the same inventory file the fleet's own Ansible provisioning
+# already treats as the source of truth means adding a host to the fleet
+# and making it eligible for cleanup become the same one-line change,
+# instead of two separate lists that can silently disagree again.
 on:
   schedule:
     - cron: "13 */6 * * *"
@@ -64,22 +77,38 @@ on:
 permissions: {}
 
 jobs:
+  generate-matrix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      hosts: ${{ steps.hosts.outputs.hosts }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Read ci_runners hosts from fleet inventory
+        id: hosts
+        shell: bash
+        run: |
+          set -euo pipefail
+          hosts_json="$(yq -o=json '.all.children.ci_runners.hosts | keys' fleet/inventory/hosts.yml)"
+          count="$(echo "${hosts_json}" | jq 'length')"
+          if [[ "${count}" -eq 0 ]]; then
+            echo "::error::No hosts found under all.children.ci_runners.hosts in fleet/inventory/hosts.yml" >&2
+            exit 1
+          fi
+          echo "Generated matrix (${count} hosts): ${hosts_json}"
+          echo "hosts=$(echo "${hosts_json}" | jq -c .)" >> "$GITHUB_OUTPUT"
+
   prune:
+    needs: generate-matrix
     strategy:
       fail-fast: false
       matrix:
-        host:
-          - osac-ci-1
-          - osac-1
-          - osac-2
-          - osac-3
-          - osac-4
-          - osac-5
-          - osac-6
-          - osac-7
-          - osac-8
-          - osac-9
-          - osac-10
+        host: ${{ fromJson(needs.generate-matrix.outputs.hosts) }}
     runs-on: ${{ matrix.host }}
     # Generous on purpose: this job's first-ever run has to work through
     # months of unbounded backlog (thousands of images, 600+GB on some
