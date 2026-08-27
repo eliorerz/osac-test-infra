@@ -279,14 +279,34 @@ jobs:
           }
 
           clean_store() {
-            local conf="$1" label="$2" rc=0
+            local conf="$1" label="$2" busy="${3:-false}" rc=0
             if [[ -n "${conf}" ]]; then
               export CONTAINERS_STORAGE_CONF="${conf}"
             else
               unset CONTAINERS_STORAGE_CONF
             fi
-            reap_e2e_containers "${label}" || rc=1
-            reap_external_containers "${label}" || rc=1
+            # Container reaping uses plain `podman rm -f`, which has no
+            # reference-count safety net the way `podman rmi` does (see
+            # prune_dangling_images's rc=2 handling below) -- it force-removes
+            # whatever matches the age filter, full stop. That's fine for
+            # reap_e2e_containers (narrowly scoped to localhost/osac-e2e-tests:*,
+            # and the `until` floor already exceeds the longest E2E run on
+            # record 2x over), but reap_external_containers's buildah/Storage
+            # containers are a different case: this file's own header comment
+            # documents finding these routinely 6+ weeks old in healthy
+            # operation, since they can persist as build-cache references
+            # across separate `podman build` invocations -- age alone can't
+            # tell "orphaned" apart from "still the cache source for a build
+            # running on this instance right now." Skip both reaps while the
+            # instance is busy; still run prune_dangling_images regardless,
+            # since that one's per-image `podman rmi` exit-code check already
+            # protects it independent of instance liveness.
+            if [[ "${busy}" == "true" ]]; then
+              echo "[${label}] instance busy -- skipping container reaping this cycle (podman rm -f has no reference-count check); dangling-image pruning still runs, protected by its own per-image check below."
+            else
+              reap_e2e_containers "${label}" || rc=1
+              reap_external_containers "${label}" || rc=1
+            fi
             prune_dangling_images "${label}" || rc=1
             return "${rc}"
           }
@@ -294,7 +314,7 @@ jobs:
           overall_rc=0
 
           echo "::group::default (pre-isolation store)"
-          clean_store "" "default" || overall_rc=1
+          clean_store "" "default" "false" || overall_rc=1
           echo "::endgroup::"
 
           # One store per runner instance -- see setup-runner-podman.sh's
@@ -308,38 +328,38 @@ jobs:
           #
           # This loop used to skip a store ENTIRELY whenever its owning
           # instance's Runner.Worker process was alive at all, deferring
-          # the whole store to "next cycle" -- removed after it was found
-          # live to cause indefinite starvation, not just an occasional
-          # one-cycle defer as intended. On osac-8 (5 runner instances
-          # under sustained back-to-back job load), 4 of 5 instances were
-          # reported busy and skipped in every one of 5 consecutive 6-hourly
-          # cycles checked, with exactly one lucky idle catch on runner-1 in
-          # that window -- the other stores accumulated 86-271GB each of
+          # the whole store to "next cycle" -- found live to cause
+          # indefinite starvation, not just an occasional one-cycle defer
+          # as intended. On osac-8 (5 runner instances under sustained
+          # back-to-back job load), 4 of 5 instances were reported busy
+          # and skipped in every one of 5 consecutive 6-hourly cycles
+          # checked, with exactly one lucky idle catch on runner-1 in that
+          # window -- the other stores accumulated 86-271GB each of
           # 100%-reclaimable dangling images, some 8 months old, having
           # apparently never been cleaned since storage isolation rolled
           # out. A host busy enough that its runners are essentially never
           # ALL idle at once starves this check by construction, no matter
           # how many cycles run.
           #
-          # Removing it is safe, not just expedient: the `until` age filter
-          # inside clean_store already gates every container/image removal
-          # to be older than the longest E2E run on record (~2h45m, with
-          # the 6h default giving 2x+ margin) -- so nothing a normally-running
-          # job creates is ever eligible for removal regardless of whether
-          # this loop treats the instance as "busy". And prune_dangling_images
-          # already handles the one case the age filter alone doesn't cover
-          # (an image still actively referenced despite being old enough) by
-          # checking podman rmi's own exit code per-image (rc=2 means still
-          # referenced -- skip that one image, retry next cycle) rather than
-          # gating on process liveness at all. That per-image check is exactly
-          # as safe as the removed per-instance one, at finer granularity, and
-          # without the starvation failure mode.
+          # Fix is scoped, not a blanket removal: clean_store still skips
+          # container reaping while busy (see its own comment -- podman rm
+          # -f has no reference-count check, unlike podman rmi), but now
+          # always runs prune_dangling_images regardless of instance
+          # liveness, since that step's own per-image podman rmi exit-code
+          # check (rc=2 = still referenced, skip and retry) already
+          # provides equivalent, finer-grained safety independent of
+          # process state -- and dangling images, not stray containers,
+          # were the actual multi-hundred-GB backlog found in production.
           shopt -s nullglob
           for conf in "${HOME}"/action-runners/runner-*/podman-storage.conf; do
             runner_dir="$(dirname "${conf}")"
             instance="$(basename "${runner_dir}")"
+            busy="false"
+            if pgrep -f "${runner_dir}/bin[^ ]*/Runner\.Worker" >/dev/null 2>&1; then
+              busy="true"
+            fi
             echo "::group::${instance}"
-            clean_store "${conf}" "${instance}" || overall_rc=1
+            clean_store "${conf}" "${instance}" "${busy}" || overall_rc=1
             echo "::endgroup::"
           done
 
