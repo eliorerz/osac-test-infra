@@ -16,7 +16,7 @@ include = ["tests*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-n 4 --dist loadfile"
+addopts = "-n 8 --dist loadfile"
 markers = [
     "sanity: fast/essential e2e coverage for PR checks",
     "regression: heavier or cross-flow e2e for periodic runs",

@@ -20,17 +20,33 @@ def allocate_worker_subnet(prefix: int = 24) -> ipaddress.IPv4Network:
     """
     Allocate subnet with worker-based namespacing to prevent conflicts in parallel execution.
 
-    Each pytest-xdist worker gets its own /16 subdivision of 172.27.0.0/16:
-    - Worker 0 (gw0): 172.27.0.x
-    - Worker 1 (gw1): 172.27.1.x
-    - Worker 2 (gw2): 172.27.2.x
-    - Worker 3 (gw3): 172.27.3.x
+    172.27.0.0/16 is split into two halves: /24 blocks from the lower half
+    (172.27.0.0 - 172.27.127.255) and /30 blocks from the upper half
+    (172.27.128.0 - 172.27.255.255), each half divided evenly across the
+    ACTUAL number of concurrent pytest-xdist workers (PYTEST_XDIST_WORKER_COUNT),
+    not a fixed count. This used to hardcode 4 workers; running with -n 6
+    made worker gw4 compute third_octet=128 on its very first /24 allocation
+    (already past the old fixed 127 ceiling) and crash immediately with
+    "exhausted /24 address space" before allocating anything -- confirmed
+    against a real failed run.
 
-    Within each worker, a sequential counter ensures unique, deterministic CIDRs.
+    Within each worker, a sequential counter allocates unique, deterministic
+    CIDRs from that worker's own slice; going past the slice raises
+    RuntimeError rather than silently wrapping into the next worker's range
+    (the old fixed-4 version only checked the absolute ceiling of the whole
+    half-space, not each worker's own slice boundary, so a worker other than
+    the last one could in principle overflow into its neighbor's range
+    without raising -- not just a fixed-worker-count problem).
     """
-    # Get pytest-xdist worker ID (e.g., "gw0", "gw1", etc.)
+    # Get pytest-xdist worker ID (e.g., "gw0", "gw1", etc.) and total worker
+    # count. pytest-xdist (this repo pins >=3.0, locked at 3.8.0) sets both
+    # PYTEST_XDIST_WORKER and PYTEST_XDIST_WORKER_COUNT together in the same
+    # code path (xdist/remote.py's setup_config), so if one is present so is
+    # the other; both default to the single-process case (gw0 of 1 worker)
+    # when running outside xdist.
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
     worker_num = int(worker_id.replace("gw", "")) if worker_id.startswith("gw") else 0
+    worker_count = int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
 
     # Use a sequential counter within this worker's address space
     if not hasattr(allocate_worker_subnet, "_counter"):
@@ -40,28 +56,32 @@ def allocate_worker_subnet(prefix: int = 24) -> ipaddress.IPv4Network:
     allocate_worker_subnet._counter += 1
 
     if prefix == 24:
-        # /24 blocks use the lower half of 172.27.0.0/16 (172.27.0.0 - 172.27.127.255)
-        # Each worker gets 32 /24 blocks
-        # Worker 0: 172.27.0.0/24, 172.27.1.0/24, ..., 172.27.31.0/24
-        # Worker 1: 172.27.32.0/24, 172.27.33.0/24, ..., 172.27.63.0/24
-        # Worker 2: 172.27.64.0/24, 172.27.65.0/24, ..., 172.27.95.0/24
-        # Worker 3: 172.27.96.0/24, 172.27.97.0/24, ..., 172.27.127.0/24
-        third_octet = worker_num * 32 + counter
-        if third_octet > 127:
-            raise RuntimeError(f"Worker {worker_id} exhausted /24 address space (counter={counter})")
+        # 128 third-octet values (172.27.0.0/24 .. 172.27.127.0/24) split
+        # evenly across worker_count workers. At worker_count=4 this
+        # reproduces the exact previous scheme (32 blocks/worker) --
+        # verified directly, not assumed.
+        blocks_per_worker = 128 // worker_count
+        if counter >= blocks_per_worker:
+            raise RuntimeError(
+                f"Worker {worker_id} exhausted /24 address space "
+                f"(counter={counter}, {blocks_per_worker} blocks/worker at worker_count={worker_count})"
+            )
+        third_octet = worker_num * blocks_per_worker + counter
         cidr = f"172.27.{third_octet}.0/24"
     elif prefix == 30:
-        # /30 blocks use the upper half of 172.27.0.0/16 (172.27.128.0 - 172.27.255.255)
-        # to avoid overlap with /24 blocks
-        # Each worker gets 32 third octets, each with 64 /30 blocks
-        # Worker 0: 172.27.128.x - 172.27.159.x
-        # Worker 1: 172.27.160.x - 172.27.191.x
-        # Worker 2: 172.27.192.x - 172.27.223.x
-        # Worker 3: 172.27.224.x - 172.27.255.x
-        third_octet = 128 + worker_num * 32 + (counter // 64)
+        # Same 128-value split applied to the upper half's third octet
+        # (172.27.128.0 .. 172.27.255.255), each third octet holding 64
+        # /30 blocks. At worker_count=4 this reproduces the exact previous
+        # scheme (32 third octets/worker, 2048 /30 blocks/worker).
+        third_octets_per_worker = 128 // worker_count
+        blocks_per_worker = third_octets_per_worker * 64
+        if counter >= blocks_per_worker:
+            raise RuntimeError(
+                f"Worker {worker_id} exhausted /30 address space "
+                f"(counter={counter}, {blocks_per_worker} blocks/worker at worker_count={worker_count})"
+            )
+        third_octet = 128 + worker_num * third_octets_per_worker + (counter // 64)
         fourth_octet = (counter % 64) * 4
-        if third_octet > 255:
-            raise RuntimeError(f"Worker {worker_id} exhausted /30 address space (counter={counter})")
         cidr = f"172.27.{third_octet}.{fourth_octet}/30"
     else:
         raise NotImplementedError(f"Prefix /{prefix} not supported")
