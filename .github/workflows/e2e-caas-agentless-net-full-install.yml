@@ -9,8 +9,10 @@ permissions:
 # ec2-runner-teardown.yml). The provision/teardown pieces are generic and
 # suite-agnostic -- see those files' own headers. Unlike the netris flow this
 # owns its triggers directly (no separate caller file): there is no fork-PR /
-# slash-command entry point for this suite, only the periodic schedule and
-# manual dispatch below.
+# slash-command entry point for this suite, only manual dispatch below.
+# The periodic schedule was removed (recent scheduled runs were all failing;
+# manually disabled via `gh workflow disable` before this file was updated to
+# match) -- manual on-demand runs remain available.
 on:
   workflow_dispatch:
     inputs:
@@ -46,9 +48,6 @@ on:
         required: false
         type: string
         default: ""
-  schedule:
-    # Every 3 hours, matching the netris full-install cadence.
-    - cron: "0 */3 * * *"
 
 concurrency:
   group: e2e-caas-agentless-net
