@@ -133,6 +133,7 @@ Key settings to configure:
 | `controller_url` | Netris controller URL (default: `http://localhost`) |
 | `controller_login` | Netris API username (default: `netris`) |
 | `controller_password` | Netris API password (default: `newNet0ps`) |
+| `controller_backend_version` | Netris controller backend image tag used for agent installation (required, e.g. `4.16.0-008`) |
 | `controller_site` | Netris site name to simulate (default: `Air`) |
 | `hypers_ssh_user` | SSH user for hypervisors (default: `ubuntu`) |
 | `servers_gw` | Management subnet CIDR for servers |
@@ -152,6 +153,7 @@ config:
     - 10.0.0.5
   netris-air:controller_url: https://controller.example.com
   netris-air:controller_password: your-password
+  netris-air:controller_backend_version: 4.16.0-008
   netris-air:controller_site: Datacenter-1
   netris-air:hypers_ssh_user: ubuntu
   netris-air:servers_gw: 192.168.16.1/20

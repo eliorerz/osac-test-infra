@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/apparentlymart/go-cidr/cidr"
@@ -42,6 +43,7 @@ func netrisControllerCfg(conf *config.Config) NetrisController {
 	if ctlCfg.Pass == "" {
 		ctlCfg.Pass = "newNet0ps"
 	}
+	ctlCfg.BackendVersion = conf.Get("controller_backend_version")
 	ctlCfg.Insecure = conf.GetBool("controller_insecure")
 	if !ctlCfg.Insecure {
 		ctlCfg.Insecure = true
@@ -90,6 +92,9 @@ func main() {
 			conf.GetObject("bgp_subnets_to_advertise", &bgpSubnetsToAdvertise)
 			serversGW = conf.Get("servers_gw")
 			ctlCfg := netrisControllerCfg(conf)
+			if ctlCfg.BackendVersion == "" {
+				return fmt.Errorf("controller_backend_version must be configured")
+			}
 			aptRepo := conf.Get("apt_repo")
 			if aptRepo == "" {
 				aptRepo = "main"
@@ -220,12 +225,13 @@ func main() {
 
 				// Create local link mapping
 				localLinkMap := LinkMapping{
-					LocalID:  id,
-					Local:    localInterface,
-					Remote:   link.Remote.Name,
-					RemoteID: id + 1,
-					LocalIP:  localIP,
-					RemoteIP: remoteIP,
+					LocalPortIndex: getPortIndex(netrisInfo.PortIndexes, link.Local.ID, localInterface),
+					LocalID:        id,
+					Local:          localInterface,
+					Remote:         link.Remote.Name,
+					RemoteID:       id + 1,
+					LocalIP:        localIP,
+					RemoteIP:       remoteIP,
 				}
 				// Check if localSwitch and localInterface exist in emptyPorts, and remove if present
 				if portsOfLocalSwitch, ok := emptyPorts[localSwitch]; ok {
@@ -243,12 +249,13 @@ func main() {
 
 				// Create remote link mapping
 				remoteLinkMap := LinkMapping{
-					LocalID:  id,
-					Local:    remoteInterface,
-					Remote:   link.Local.Name,
-					RemoteID: id - 1,
-					LocalIP:  remoteIP,
-					RemoteIP: localIP,
+					LocalPortIndex: getPortIndex(netrisInfo.PortIndexes, link.Remote.ID, remoteInterface),
+					LocalID:        id,
+					Local:          remoteInterface,
+					Remote:         link.Local.Name,
+					RemoteID:       id - 1,
+					LocalIP:        remoteIP,
+					RemoteIP:       localIP,
 				}
 				// Check if remoteSwitch and remoteInterface exist in emptyPorts, and remove if present
 				if portsOfRemoteSwitch, ok := emptyPorts[remoteSwitch]; ok {
@@ -274,6 +281,10 @@ func main() {
 						}
 					}
 				}
+			}
+			for vmName, links := range hypervisorToLinks {
+				sortLinkMappings(links)
+				hypervisorToLinks[vmName] = links
 			}
 
 			// jsonData, err := json.Marshal(hypervisorToLinks)
@@ -930,6 +941,15 @@ func createVM(ctx *pulumi.Context, provider *libvirt.Provider, name string, hype
 
 }
 
+func controllerInfo(ctlCfg NetrisController, authKey string, aptRepo string) NetrisControllerInfo {
+	return NetrisControllerInfo{
+		Version: ctlCfg.BackendVersion,
+		AuthKey: authKey,
+		URL:     ctlCfg.URL,
+		AptRepo: aptRepo,
+	}
+}
+
 func getFromNetris(ctx *pulumi.Context, ctlCfg NetrisController, serversGW string, aptRepo string) (*NetrisInfo, error) {
 	// Netris Client
 	nclient, err := napi.Client(ctlCfg.URL, ctlCfg.Login, ctlCfg.Pass, 60)
@@ -971,9 +991,13 @@ func getFromNetris(ctx *pulumi.Context, ctlCfg NetrisController, serversGW strin
 
 	// Create a map with switchName as the key
 	allPortsBySwName := make(map[string]map[string]interface{})
+	portIndexes := make(map[int]int)
 
 	// Insert objects into the map
 	for _, obj := range allPorts {
+		if index, err := strconv.Atoi(obj.PortIndex); err == nil {
+			portIndexes[obj.ID] = index
+		}
 		if obj.Breakout == "off" && len(obj.SlavePorts) == 0 {
 			if _, ok := allPortsBySwName[obj.SwitchName]; !ok {
 				allPortsBySwName[obj.SwitchName] = make(map[string]interface{})
@@ -1106,11 +1130,6 @@ func getFromNetris(ctx *pulumi.Context, ctlCfg NetrisController, serversGW strin
 		filteredSubnets = append(filteredSubnets, mgmtSubnetForServers)
 	}
 
-	ctlVersion, err := nclient.Version().Get()
-	if err != nil {
-		return nil, err
-	}
-
 	ctlGlobalSettings, err := nclient.GlobalSettings().Get()
 	if err != nil {
 		return nil, err
@@ -1126,18 +1145,14 @@ func getFromNetris(ctx *pulumi.Context, ctlCfg NetrisController, serversGW strin
 	}
 
 	netrisInfo := &NetrisInfo{
-		Hardware:    devices,
-		Links:       switchPortsLinks,
-		BGPLinks:    bgpLinks,
-		SiteName:    ctlCfg.Site,
-		SiteObject:  *site,
-		MGMTSubnets: filteredSubnets,
-		ControllerInfo: NetrisControllerInfo{
-			Version: ctlVersion.BuildVersion,
-			AuthKey: ctlAuthKey,
-			URL:     ctlCfg.URL,
-			AptRepo: aptRepo,
-		},
+		Hardware:         devices,
+		Links:            switchPortsLinks,
+		BGPLinks:         bgpLinks,
+		PortIndexes:      portIndexes,
+		SiteName:         ctlCfg.Site,
+		SiteObject:       *site,
+		MGMTSubnets:      filteredSubnets,
+		ControllerInfo:   controllerInfo(ctlCfg, ctlAuthKey, aptRepo),
 		allPortsBySwName: allPortsBySwName,
 	}
 
@@ -1163,6 +1178,45 @@ func sortedPortsKey(id1, id2 int) string {
 	ids := []int{id1, id2}
 	sort.Ints(ids)
 	return fmt.Sprintf("%d-%d", ids[0], ids[1])
+}
+
+func getPortIndex(portIndexes map[int]int, id int, name string) int {
+	if index, ok := portIndexes[id]; ok {
+		return index
+	}
+
+	if strings.HasPrefix(name, "eth") {
+		if index, err := strconv.Atoi(strings.TrimPrefix(name, "eth")); err == nil {
+			return index
+		}
+	}
+
+	return 0
+}
+
+func sortLinkMappings(links []LinkMapping) {
+	sort.SliceStable(links, func(i, j int) bool {
+		iIndex := links[i].LocalPortIndex
+		jIndex := links[j].LocalPortIndex
+		if iIndex == 0 {
+			iIndex = getPortIndex(nil, 0, links[i].Local)
+		}
+		if jIndex == 0 {
+			jIndex = getPortIndex(nil, 0, links[j].Local)
+		}
+
+		if iIndex == 0 && jIndex != 0 {
+			return false
+		}
+		if iIndex != 0 && jIndex == 0 {
+			return true
+		}
+		if iIndex != jIndex {
+			return iIndex < jIndex
+		}
+
+		return links[i].Local < links[j].Local
+	})
 }
 
 // Helper function to split the interface name

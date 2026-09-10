@@ -180,11 +180,11 @@ deploys these containers:
 
 | Container   | Version   | Purpose                                       |
 |-------------|-----------|-----------------------------------------------|
-| Backend     | 4.9.0-012 | Node.js REST API and business logic            |
-| Frontend    | 4.9.0-006 | Node.js web UI                                 |
-| gRPC        | 4.9.0.005 | Go gRPC server -- switch/softgate agent comms  |
-| Telescope   | 4.9.0.002 | Telemetry collection and monitoring            |
-| Migration   | 4.9.0     | Database schema migrations                     |
+| Backend     | 4.16.0-008 | Node.js REST API and business logic            |
+| Frontend    | 4.16.0-003 | Node.js web UI                                 |
+| gRPC        | 4.16.0.001 | Go gRPC server -- switch/softgate agent comms  |
+| Telescope   | 4.16.0.002 | Telemetry collection and monitoring            |
+| Migration   | 4.16.0     | Database schema migrations                     |
 | MariaDB     | (bundled) | Primary relational database                    |
 | MongoDB     | (bundled) | Document store for telemetry                   |
 | Redis       | (bundled) | Caching and pub/sub                            |
