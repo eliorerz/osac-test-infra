@@ -37,11 +37,24 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Circle, FancyBboxPatch, Wedge  # noqa: E402
 import numpy as np  # noqa: E402
 import requests  # noqa: E402
+from requests.adapters import HTTPAdapter  # noqa: E402
+from urllib3.util.retry import Retry  # noqa: E402
 
 EXPORTER_URL = os.getenv("EXPORTER_URL", "http://127.0.0.1:9103")
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID")
 DRY_RUN = os.getenv("DRY_RUN", "").lower() in ("true", "1", "yes")
+
+# The exporter runs as a quadlet container on the same host that redeploys it
+# on every push to main (deploy-monitoring.yml) -- a digest run that happens
+# to overlap with that restart (SIGTERM, up to a 10s grace period, then
+# SIGKILL) would otherwise hard-fail on a plain ConnectionResetError. Retries
+# only connect/read-phase failures and 502/503/504, not real API errors
+# (a 4xx/other 5xx still raises immediately via raise_for_status below).
+_SESSION = requests.Session()
+_retry = Retry(total=4, backoff_factor=1.5, status_forcelist=(502, 503, 504), allowed_methods=("GET",))
+_SESSION.mount("http://", HTTPAdapter(max_retries=_retry))
+_SESSION.mount("https://", HTTPAdapter(max_retries=_retry))
 
 # Palette matching the reference dashboard mockup: light cyan-to-blue
 # gradient background, white "headline" cards, dark navy "detail" cards
@@ -59,7 +72,7 @@ COLOR_TEXT_MUTED = "#9fb8cc"
 
 
 def _get(path, **params):
-    resp = requests.get(f"{EXPORTER_URL}{path}", params=params, timeout=30)
+    resp = _SESSION.get(f"{EXPORTER_URL}{path}", params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
