@@ -155,6 +155,71 @@ class ReadArtifactFileSandboxTests(unittest.TestCase):
         self.assertEqual(result, "real content\n")
 
 
+class ExtractJobLogErrorsTests(unittest.TestCase):
+    """Regression coverage for the PR #947 misdiagnosis (run 34779987871):
+    a botocore version bump broke a `pip install` during the ansible-
+    builder image-assemble step, before the E2E suite (and thus the
+    cluster it runs against) ever started -- but the AI diagnosis blamed
+    an invalid registry.redhat.io pull secret, because the only evidence
+    fed to it was cluster-side marketplace/OLM events from a cluster that
+    never finished provisioning. This function's job is to surface the
+    job's OWN ##[error]-marked output so that real, PR-caused failure is
+    actually visible to the model instead of silently absent.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.tmpdir = tempfile.mkdtemp()
+
+    def _write_log(self, text):
+        path = os.path.join(self.tmpdir, "job.log")
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_no_path_returns_placeholder(self):
+        self.assertEqual(ai_diagnose_failure.extract_job_log_errors(""), "(no job log available)")
+
+    def test_missing_file_returns_placeholder(self):
+        result = ai_diagnose_failure.extract_job_log_errors(os.path.join(self.tmpdir, "nope.log"))
+        self.assertEqual(result, "(no job log available)")
+
+    def test_no_error_marker_returns_placeholder(self):
+        path = self._write_log("2026-09-13T20:11:39Z some ordinary output\nnothing wrong here\n")
+        result = ai_diagnose_failure.extract_job_log_errors(path)
+        self.assertEqual(result, "(no ##[error] markers found in job log)")
+
+    def test_captures_context_before_error(self):
+        text = (
+            "2026-09-13T20:21:23Z ERROR: Cannot install botocore==1.43.92 and botocore>=1.31.0"
+            " because these package versions have conflicting dependencies.\n"
+            "2026-09-13T20:21:23Z     boto3 1.43.56 depends on botocore<1.44.0 and >=1.43.56\n"
+            "2026-09-13T20:21:23Z     aiobotocore 3.9.0 depends on botocore<1.43.57 and >=1.43.3\n"
+            "2026-09-13T20:21:26Z ##[error]Process completed with exit code 1.\n"
+        )
+        result = ai_diagnose_failure.extract_job_log_errors(self._write_log(text))
+        self.assertIn("conflicting dependencies", result)
+        self.assertIn("aiobotocore 3.9.0 depends on botocore", result)
+        self.assertIn("##[error]Process completed with exit code 1.", result)
+
+    def test_caps_number_of_error_blocks(self):
+        lines = []
+        for i in range(ai_diagnose_failure.MAX_JOB_LOG_MATCHES + 3):
+            lines.append(f"context line for error {i}\n##[error]failure number {i}\n")
+        result = ai_diagnose_failure.extract_job_log_errors(self._write_log("".join(lines)))
+        self.assertIn("further ##[error] marker(s) not shown", result)
+        # Only the first MAX_JOB_LOG_MATCHES errors' own text should appear.
+        self.assertIn(f"failure number {ai_diagnose_failure.MAX_JOB_LOG_MATCHES - 1}", result)
+        self.assertNotIn(f"failure number {ai_diagnose_failure.MAX_JOB_LOG_MATCHES}", result)
+
+    def test_truncates_when_over_char_budget(self):
+        huge_context = "x" * (ai_diagnose_failure.MAX_JOB_LOG_CHARS * 2) + "\n##[error]boom\n"
+        result = ai_diagnose_failure.extract_job_log_errors(self._write_log(huge_context))
+        self.assertTrue(result.endswith("... (truncated)"))
+        self.assertLessEqual(len(result), ai_diagnose_failure.MAX_JOB_LOG_CHARS + len("\n... (truncated)"))
+
+
 def _fake_resp(text, finish_reason="STOP"):
     return SimpleNamespace(
         text=text,

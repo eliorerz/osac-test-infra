@@ -386,6 +386,96 @@ jobs:
           echo "found=true" >> "${GITHUB_OUTPUT}"
           echo "dir=${EXTRACT_DIR}" >> "${GITHUB_OUTPUT}"
 
+      # osac-logs-*/junit.xml and gather-osac-logs.sh's cluster-side dump
+      # (downloaded above) are both empty or incomplete whenever the job
+      # fails BEFORE the E2E suite starts -- e.g. a dependency-bump PR
+      # breaking a build/install step (see PR #947, run 34779987871: the
+      # AI diagnosis blamed a registry.redhat.io pull secret using nothing
+      # but leftover marketplace/OLM events from a cluster that never
+      # finished provisioning, while the real error -- a botocore/
+      # aiobotocore pip ResolutionImpossible during the image-assemble
+      # step -- sat unread in this same job's own log). Fetching the job's
+      # own log and handing ai-diagnose-failure.py a bounded excerpt around
+      # its ##[error] markers (see extract_job_log_errors there) gives the
+      # model the one piece of evidence that actually explains a failure
+      # like that. Same job-name match as "Check whether the E2E test job
+      # actually ran" above.
+      - name: Identify and download the failing step's log
+        id: job-log
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          # The jobs-list response already embeds each job's full `steps`
+          # array (name/conclusion/started_at/completed_at per step) --
+          # no separate per-job API call needed to get that.
+          job_json=$(gh api --paginate "repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name | test("^e2e-[a-z]+-full-install(\\s*/.*)?$"))' | head -1)
+          if [[ -z "${job_json}" ]]; then
+            echo "No e2e-*-full-install job found for run ${RUN_ID}; diagnosing without job-log signal."
+            echo "path=" >> "${GITHUB_OUTPUT}"
+            echo "step-name=" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          job_id=$(jq -r '.id' <<<"${job_json}")
+
+          # First step whose own conclusion is failure -- this is the step
+          # that actually broke the job, distinct from the job's overall
+          # conclusion (which e.g. a build/install failure before "Run E2E
+          # tests" also sets to failure, indistinguishable from a real
+          # test failure without checking steps individually).
+          failed_step=$(jq -c '[.steps[]? | select(.conclusion == "failure")] | first // empty' <<<"${job_json}")
+          step_name=$(jq -r 'if . == null then "" else (.name // "") end' <<<"${failed_step}")
+          step_started=$(jq -r 'if . == null then "" else (.started_at // "") end' <<<"${failed_step}")
+          step_completed=$(jq -r 'if . == null then "" else (.completed_at // "") end' <<<"${failed_step}")
+          echo "step-name=${step_name}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${step_name}" ]]; then
+            echo "Failing step: '${step_name}' (${step_started} - ${step_completed})"
+          else
+            echo "No step with conclusion=failure found on this job (job itself may have been cancelled)."
+          fi
+
+          log_path="${RUNNER_TEMP}/job.log"
+          if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" > "${log_path}" 2>/dev/null; then
+            echo "Failed to download log for job ${job_id}; diagnosing without job-log signal."
+            echo "path=" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          step_log_path="${RUNNER_TEMP}/failed-step.log"
+          if [[ -n "${step_started}" && -n "${step_completed}" ]]; then
+            # Each raw log line starts with an RFC3339 UTC timestamp as its
+            # first whitespace-delimited field (e.g.
+            # "2026-09-13T20:21:23.4372046Z ##[error]..."), while the API's
+            # started_at/completed_at are whole-second ("...:23Z"). Strip
+            # sub-second precision from the log line's timestamp before
+            # comparing so both sides are the same format -- lexicographic
+            # string comparison then equals chronological comparison at
+            # 1-second resolution, which is more than precise enough here.
+            awk -v start="${step_started}" -v end="${step_completed}" '
+              {
+                ts = $1
+                sub(/\.[0-9]+Z$/, "Z", ts)
+                if (ts >= start && ts <= end) print
+              }
+            ' "${log_path}" > "${step_log_path}" || true
+          fi
+
+          if [[ -s "${step_log_path}" ]]; then
+            echo "path=${step_log_path}" >> "${GITHUB_OUTPUT}"
+          else
+            # Fall back to the whole job log if step-window filtering
+            # found nothing (couldn't resolve a failed step's timestamps,
+            # or the job was cancelled outright rather than one step
+            # failing) -- extract_job_log_errors() in
+            # ai-diagnose-failure.py still finds ##[error] markers fine
+            # in the unfiltered log, just without the precise step
+            # boundary.
+            echo "path=${log_path}" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Authenticate for AI diagnosis
         id: vertex-auth
         uses: ./.github/actions/vertex-ai-auth
@@ -441,6 +531,8 @@ jobs:
         env:
           ARTIFACT_DIR: ${{ steps.artifact.outputs.dir }}
           JUNIT_PATH: ${{ steps.artifact.outputs.dir }}/junit.xml
+          JOB_LOG_PATH: ${{ steps.job-log.outputs.path }}
+          FAILED_STEP_NAME: ${{ steps.job-log.outputs.step-name }}
           GOOGLE_CLOUD_PROJECT: ${{ steps.vertex-auth.outputs.gcp-project }}
           GOOGLE_CLOUD_LOCATION: ${{ steps.vertex-auth.outputs.gcp-location }}
           # `inputs.gemini-model` only exists when this workflow was invoked

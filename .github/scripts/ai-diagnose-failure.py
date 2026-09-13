@@ -2,10 +2,12 @@
 """Diagnose an E2E test failure with Gemini via Vertex AI.
 
 Reads already-redacted, already-gathered failure data (JUnit XML + cluster
-logs/events from gather-osac-logs.sh) and writes a short root-cause
-diagnosis to $GITHUB_STEP_SUMMARY. Never executes or reads anything from a
-PR's own source checkout -- only the artifact directory this same job's
-Gather artifacts step already produced.
+logs/events from gather-osac-logs.sh, plus a bounded excerpt of the
+GitHub Actions job's own log around any ##[error] markers) and writes a
+short root-cause diagnosis to $GITHUB_STEP_SUMMARY. Never executes or
+reads anything from a PR's own source checkout -- only the artifact
+directory this same job's Gather artifacts step already produced, and the
+CI-generated job log fetched via the GitHub API.
 
 Bounded by design: sends a fixed-size extract, not the full multi-file
 dump, to keep the prompt (and cost) predictable regardless of how much a
@@ -33,6 +35,33 @@ MAX_JUNIT_BYTES = 20 * 1024 * 1024
 
 ARTIFACT_DIR = os.environ.get("ARTIFACT_DIR", "")
 JUNIT_PATH = os.environ.get("JUNIT_PATH", "")
+# Path to the raw GitHub Actions log for the e2e-*-full-install job itself
+# (downloaded via `gh api .../actions/jobs/{id}/logs`) -- pre-filtered by
+# the caller to just the FAILING step's own timestamp window when that
+# step could be resolved, else the whole job log. NOT the cluster logs
+# gather-osac-logs.sh collects. Optional -- callers that can't resolve a
+# job id (or whose gh CLI call fails) leave this unset, and
+# extract_job_log_errors() below degrades gracefully. This exists because
+# ARTIFACT_DIR/JUNIT_PATH are both cluster/test-suite evidence: they are
+# empty or reflect a half-provisioned cluster whenever the job fails
+# *before* the E2E suite ever starts (a dependency-bump PR breaking a
+# `pip install`/image-build step is the common case -- see PR #947, run
+# 34779987871, misdiagnosed as a registry.redhat.io pull-secret issue
+# because the only "evidence" available was leftover marketplace/OLM
+# events from a cluster that never finished provisioning; the actual
+# failure -- a botocore/aiobotocore pip ResolutionImpossible during the
+# ansible-builder image assemble step -- was sitting in the job's own log,
+# which nothing was reading at all). Ground-truthed by manually fetching
+# that job's log and finding the real error nowhere in ARTIFACT_DIR.
+JOB_LOG_PATH = os.environ.get("JOB_LOG_PATH", "")
+# Name of the step whose own conclusion is "failure" (from the job's
+# `steps[]` array, e.g. "Build and load component images"), resolved by
+# the same caller that produces JOB_LOG_PATH. Distinct from the job's
+# overall conclusion: a pre-test build/install step failing also makes
+# the whole job "failure", indistinguishable from a real test failure
+# without this. Empty when no step-level failure could be resolved (e.g.
+# the job was cancelled outright rather than one step failing).
+FAILED_STEP_NAME = os.environ.get("FAILED_STEP_NAME", "")
 GOOGLE_CLOUD_PROJECT = os.environ["GOOGLE_CLOUD_PROJECT"]
 GOOGLE_CLOUD_LOCATION = os.environ["GOOGLE_CLOUD_LOCATION"]
 # Must be a key in GEMINI_PRICING_USD_PER_MILLION below, or the cost estimate
@@ -277,6 +306,58 @@ def extract_log_signal(artifact_dir):
     if not matches:
         return "(no error/warning lines matched)"
     return _annotate_retried_aap_failures("\n".join(matches), artifact_dir)
+
+
+# GitHub Actions annotates a step's own fatal error(s) with a literal
+# "##[error]" prefix in the raw job log -- this is a much more precise
+# anchor than the broad error|traceback|panic|failed|exception regex above
+# (which is tuned for noisy Ansible/pod-log text, not GHA's own log
+# format), and it is emitted regardless of which step failed (a `podman
+# build`/pip install, a shell script, or the pytest invocation itself).
+JOB_LOG_ERROR_MARKER = "##[error]"
+MAX_JOB_LOG_MATCHES = 6
+MAX_JOB_LOG_CONTEXT_LINES = 60
+MAX_JOB_LOG_CHARS = 12000
+
+
+def extract_job_log_errors(path):
+    """Bounded excerpt of the job's OWN log around each ##[error] marker.
+
+    Distinct from extract_log_signal() above: that function reads cluster
+    logs/events gathered from the target OpenShift cluster; this reads the
+    GitHub Actions job's own stdout/stderr. The two can tell completely
+    different stories -- a build/install step can fail (and emit
+    ##[error]) before the cluster is ever fully provisioned, in which case
+    the cluster-side evidence is incomplete/pre-test while this is the
+    only section that actually explains what happened. Kept as a small,
+    bounded excerpt (not the whole log, which can be MBs) the same way
+    extract_log_signal bounds cluster evidence.
+    """
+    if not path or not os.path.isfile(path):
+        return "(no job log available)"
+    try:
+        with open(path, "r", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return "(no job log available)"
+
+    error_indices = [i for i, line in enumerate(lines) if JOB_LOG_ERROR_MARKER in line]
+    if not error_indices:
+        return "(no ##[error] markers found in job log)"
+
+    blocks = []
+    for idx in error_indices[:MAX_JOB_LOG_MATCHES]:
+        start = max(0, idx - MAX_JOB_LOG_CONTEXT_LINES)
+        excerpt = "".join(lines[start : idx + 1]).rstrip("\n")
+        blocks.append(f"--- job log context leading to error at line {idx + 1} ---\n{excerpt}")
+
+    if len(error_indices) > MAX_JOB_LOG_MATCHES:
+        blocks.append(f"... ({len(error_indices) - MAX_JOB_LOG_MATCHES} further ##[error] marker(s) not shown)")
+
+    text = "\n\n".join(blocks)
+    if len(text) > MAX_JOB_LOG_CHARS:
+        text = text[:MAX_JOB_LOG_CHARS] + "\n... (truncated)"
+    return text
 
 
 MAX_TOOL_CALLS = 15
@@ -1325,8 +1406,62 @@ def call_gemini(prompt, artifact_dir):
 def main():
     junit_section = extract_junit_failures(JUNIT_PATH)
     log_section = extract_log_signal(ARTIFACT_DIR)
+    job_log_section = extract_job_log_errors(JOB_LOG_PATH)
+    failed_step_line = (
+        f"The GitHub Actions step that actually failed is: \"{FAILED_STEP_NAME}\"."
+        if FAILED_STEP_NAME
+        else "(the specific failing step could not be resolved -- the job may have been cancelled outright rather than one step failing)"
+    )
     file_listing = build_file_listing(ARTIFACT_DIR)
     known_issues_section = KNOWN_ISSUES
+    # True whenever the JUnit section carries no evidence that the pytest
+    # suite itself ever ran (missing file, unparseable, or parsed but zero
+    # failed/errored testcases) -- the three non-failure strings
+    # extract_junit_failures can return. A real "suite ran, everything
+    # passed" case never reaches this script at all (the job only gets
+    # here via `if: failure()`), so any of these three, on a run that
+    # DID fail, means the failure happened before/outside the pytest
+    # invocation -- most commonly a build/install step -- not during it.
+    no_test_evidence = junit_section in (
+        "(no junit.xml found)",
+        "(no failed/errored testcases in junit.xml)",
+    ) or junit_section.startswith("(junit.xml")
+
+    no_test_evidence_banner = (
+        f"""
+## READ THIS FIRST: no evidence the E2E test suite ever ran
+
+The JUnit section below (source 1) has no failed/errored testcases -- on a
+run that failed, that means pytest never started, or never got far enough
+to record a result. The failure is almost certainly in an earlier setup
+step: booting/cloning the cluster, building or loading a component image,
+installing an operator, or installing OSAC itself -- NOT a live-cluster
+test failure. This changes which evidence is authoritative:
+
+- Source 2 (cluster log-signal, gathered from the target OpenShift
+  cluster) may reflect a cluster that never finished provisioning. Pending
+  operators, unconfigured catalog sources, or missing subscriptions are
+  EXPECTED at that stage and are not automatically the root cause just
+  because they look like errors -- do not lead with them unless you can
+  show they are actually what the job log names as the failure.
+- Source 5 below (the GitHub Actions job's own log, around its
+  ##[error] marker(s)) is the CI system's own record of which step failed
+  and why, and should be your PRIMARY evidence here.
+- If this PR's diff (below, when present) touches a dependency/version
+  file (requirements.txt, uv.lock, go.mod, package.json, etc.) and
+  source 5 shows an install/build/resolver error, connect the two
+  explicitly and cite both -- a version bump causing a dependency
+  conflict at build time is a definitive, citable root cause, not a guess.
+- If source 5 ALSO has nothing (no job log, or no ##[error] markers), you
+  have no authoritative evidence for what actually failed. Do not fall
+  back to source 2's cluster noise to manufacture a confident-sounding
+  story in that case -- report a low confidence (well under
+  {CONFIDENCE_THRESHOLD_PERCENT}%) and say plainly that no evidence
+  pinpoints which pre-test step failed.
+"""
+        if no_test_evidence
+        else ""
+    )
 
     changed_files_section = (
         f"\n## Files changed in this PR (may hint at what to check first)\n{CHANGED_FILES}\n"
@@ -1365,7 +1500,7 @@ cluster and runs a pytest E2E suite against it. The run's own logs and
 job list are at: {RUN_URL or "(url unavailable)"}
 
 {OSAC_CONTEXT}
-
+{no_test_evidence_banner}
 ## Known recurring CI issues (check this FIRST)
 
 Curated by the team from past diagnoses -- if this failure's symptoms
@@ -1448,6 +1583,16 @@ log locations that weren't given to you:
    (a test-design gap, not a product bug). Trace the object's real fate
    before concluding either way; don't guess from the timeout value
    alone.
+5. {failed_step_line} A bounded excerpt of that job's OWN log (its
+   stdout/stderr, not cluster logs) around every line it marked
+   "##[error]" is below, pre-filtered to the failing step's own output
+   when it could be isolated. This is the CI system's own record of
+   exactly which step failed and why. If this section says no job log
+   was available, or no ##[error] markers were found, that's a gap in
+   what could be gathered, not evidence that every step actually
+   succeeded. When the JUnit section (source 1) shows no test failures,
+   treat THIS section, not source 2, as your primary evidence -- see the
+   "READ THIS FIRST" note above if present.
 {changed_files_section}{pr_diff_section}
 Given this evidence, produce a structured diagnosis for a developer who
 has not looked at the run yet. Real artifacts are often dominated by
@@ -1512,6 +1657,32 @@ evidence and tool calls, and still not reaching {CONFIDENCE_THRESHOLD_PERCENT}%,
 should you say so explicitly, name exactly what evidence is missing, and
 report your real (lower) confidence -- never inflate it.
 
+CONFIDENCE MUST TRACK THE STRENGTH OF THE CAUSAL LINK, NOT HOW MUCH EFFORT
+YOU SPENT OR HOW PLAUSIBLE THE STORY SOUNDS. Two specific traps to avoid,
+both confirmed from real past misdiagnoses:
+- Coincidental evidence: log/event lines that are real but exist for
+  reasons unrelated to this specific failure (e.g. a marketplace/OLM
+  error that's simply expected on a cluster that never finished
+  installing OSAC, or a routine retry that later succeeded) can look
+  exactly like a genuine error match without being causally connected to
+  it. Reaching {CONFIDENCE_THRESHOLD_PERCENT}% on such a line requires
+  actually corroborating it against the specific failing step (cross-
+  check it against the JUnit failure or the GitHub Actions job log,
+  source 5) -- surface resemblance to "an error" is not enough.
+- Sunk-cost pressure: having used many tool calls, or having run out of
+  other ideas, is not itself evidence that your current best guess is
+  correct. If the strongest story you can build is still an inference
+  chain resting on circumstantial or indirect evidence, your honest
+  confidence is well below {CONFIDENCE_THRESHOLD_PERCENT}% -- report that
+  lower number rather than rounding up to clear the bar.
+As a rough guide: {CONFIDENCE_THRESHOLD_PERCENT}%+ requires a direct,
+verified citation that specifically explains the failing step or test
+(the exact error line, stack trace, or resolver message naming the
+mechanism); 60-89% is a strong but not fully verified inference; below
+60% means you are relying on circumstantial evidence, elimination, or a
+plausible-sounding guess -- say so plainly at that confidence level
+instead of dressing it up as definitive.
+
 End your response with a line in EXACTLY this format as the last line
 (used for automated parsing):
 **Confidence:** NN%
@@ -1523,6 +1694,10 @@ correct.
 
 ## Matching log/event lines (grepped for error/traceback/panic/failed/exception)
 {log_section}
+
+## GitHub Actions job log excerpts around ##[error] markers (the CI job's own output, NOT cluster logs)
+{failed_step_line}
+{job_log_section}
 
 ## Available files (path relative to artifact root, size in bytes)
 {file_listing}
