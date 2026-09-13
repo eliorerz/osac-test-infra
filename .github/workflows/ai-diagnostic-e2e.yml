@@ -421,12 +421,27 @@ jobs:
           fi
           job_id=$(jq -r '.id' <<<"${job_json}")
 
-          # First step whose own conclusion is failure -- this is the step
-          # that actually broke the job, distinct from the job's overall
-          # conclusion (which e.g. a build/install failure before "Run E2E
-          # tests" also sets to failure, indistinguishable from a real
-          # test failure without checking steps individually).
-          failed_step=$(jq -c '[.steps[]? | select(.conclusion == "failure")] | first // empty' <<<"${job_json}")
+          # EARLIEST (lowest step `number`) step whose own conclusion is
+          # failure -- this is the step that actually broke the job,
+          # distinct from the job's overall conclusion (which e.g. a
+          # build/install failure before "Run E2E tests" also sets to
+          # failure, indistinguishable from a real test failure without
+          # checking steps individually).
+          #
+          # More than one step can independently show failure: e.g.
+          # "Install OSAC" fails for a real reason, and "Teardown"
+          # (if: always()) then ALSO fails because it can't clean up
+          # against an already-broken cluster -- a downstream consequence,
+          # not the cause, and not worth ever surfacing as FAILED_STEP_NAME.
+          # Picking the earliest failure by `number` (explicitly sorted,
+          # not relying on API response order) always resolves to the real
+          # root-cause step in that pattern, since every later step
+          # (teardown included) runs strictly after it. This also means
+          # the log-window filter below naturally excludes the later
+          # failure's own log entirely: its window starts after the
+          # earliest failure's `completed_at`, so its content is never in
+          # what gets passed to ai-diagnose-failure.py.
+          failed_step=$(jq -c '[.steps[]? | select(.conclusion == "failure")] | sort_by(.number) | first // empty' <<<"${job_json}")
           step_name=$(jq -r 'if . == null then "" else (.name // "") end' <<<"${failed_step}")
           step_started=$(jq -r 'if . == null then "" else (.started_at // "") end' <<<"${failed_step}")
           step_completed=$(jq -r 'if . == null then "" else (.completed_at // "") end' <<<"${failed_step}")
