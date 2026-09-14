@@ -1,0 +1,140 @@
+---
+name: Resolve PR from head SHA
+description: >-
+  Resolves a workflow_run event's head_sha/head_branch back to the open PR
+  it belongs to -- shared by ai-diagnostic-e2e.yml's own `resolve` job and
+  e2e-reserve-comment-on-start.yml, both of which need the exact same
+  resolution (including the merge_group-specific branch-name parsing and
+  batching guard) so it lives here once rather than as two copies that
+  could drift out of sync with each other.
+
+inputs:
+  repo:
+    description: "owner/name of the repo the workflow_run event belongs to"
+    required: true
+  head-sha:
+    description: "github.event.workflow_run.head_sha"
+    required: true
+  event-name:
+    description: "github.event.workflow_run.event (e.g. pull_request, merge_group)"
+    required: true
+  head-branch:
+    description: "github.event.workflow_run.head_branch"
+    required: true
+  github-token:
+    description: >-
+      Token with at least contents: read (the merge_group PR-batching
+      check's commits/{sha} lookup is a Contents API endpoint, not a Pull
+      requests one) and pull-requests: read on `repo`.
+    required: true
+
+outputs:
+  found:
+    description: "\"true\" if a unique open PR was resolved, \"false\" otherwise"
+    value: ${{ steps.pr.outputs.found }}
+  number:
+    description: "The resolved PR number (only set when found == \"true\")"
+    value: ${{ steps.pr.outputs.number }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve PR from head SHA
+      id: pr
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ inputs.repo }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        EVENT_NAME: ${{ inputs.event-name }}
+        HEAD_BRANCH: ${{ inputs.head-branch }}
+      run: |
+        set -euo pipefail
+
+        # merge_group's head_sha is a synthetic merge-queue commit, never
+        # the PR's own head.sha -- the head.sha-matching path below would
+        # never find a match for it regardless of how long we search.
+        # GitHub's merge queue instead encodes the PR number directly in
+        # the temporary branch name it creates (documented format:
+        # gh-readonly-queue/<base>/pr-<number>-<sha>), so parse that
+        # instead. Confirmed live against run 33666352565 on PR #257.
+        if [[ "${EVENT_NAME}" == "merge_group" ]]; then
+          if [[ "${HEAD_BRANCH}" =~ ^gh-readonly-queue/[^/]+/pr-([0-9]+)- ]]; then
+            pr_number="${BASH_REMATCH[1]}"
+            # This repo's merge queue can batch multiple PRs into one
+            # build (grouping_strategy: ALLGREEN, max_entries_to_build: 4
+            # per the ci-status-checks ruleset) -- the branch name only
+            # ever reflects ONE of them, so a batched failure could
+            # actually be caused by a different PR in the same group.
+            # merge_method is SQUASH, and each squashed PR's own
+            # "(#N)" trailer survives into the final commit message, so
+            # count distinct trailers as a proxy for how many PRs this
+            # build actually covers, and skip (rather than guess) if
+            # it's more than the one this branch name names.
+            # A failed lookup here must not silently fall through as an
+            # empty commit_message: that would make pr_ref_count come out
+            # as 0 (grep finds no trailers in ""), which reads exactly
+            # like "confirmed no batching" -- the code would then go on to
+            # attribute the failure to pr_number as if that were verified,
+            # when in fact batching could genuinely not be checked at all.
+            if ! commit_message=$(gh api "repos/${REPO}/commits/${HEAD_SHA}" --jq '.commit.message' 2>/dev/null); then
+              echo "Failed to fetch commit message for ${HEAD_SHA:0:7}; cannot check for PR batching, skipping rather than risking a misattributed failure."
+              echo "found=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            # `|| true` on the whole pipeline, not just grep: under
+            # pipefail, grep finding zero trailers (a real, common case --
+            # most commit messages have none) exits 1, which -- absent
+            # this -- propagates as the pipeline's own exit status and
+            # aborts the step under set -e before pr_ref_count is even
+            # assigned. sort/wc still run through their normal (empty)
+            # input either way, so the count itself is unaffected; this
+            # only stops the zero-match case from being treated as an
+            # error.
+            pr_ref_count=$(grep -oE '\(#[0-9]+\)' <<<"${commit_message}" | sort -u | wc -l || true)
+            if [[ "${pr_ref_count}" -gt 1 ]]; then
+              echo "Merge group at ${HEAD_SHA:0:7} batches ${pr_ref_count} PRs (multiple '(#N)' trailers in the commit message); skipping rather than attributing this to a single PR."
+              echo "found=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            # Confirm still open -- a merge_group run can finish after its
+            # PR was already merged/closed (e.g. superseded by a later
+            # queue entry), and posting to a closed PR's thread is
+            # confusing, not useful.
+            if pr_state=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.state' 2>/dev/null) && [[ "${pr_state}" == "open" ]]; then
+              echo "found=true" >> "${GITHUB_OUTPUT}"
+              echo "number=${pr_number}" >> "${GITHUB_OUTPUT}"
+            else
+              echo "Parsed PR #${pr_number} from merge_group branch '${HEAD_BRANCH}' but it's not open (state: ${pr_state:-unknown}); skipping."
+              echo "found=false" >> "${GITHUB_OUTPUT}"
+            fi
+          else
+            echo "merge_group head_branch '${HEAD_BRANCH}' doesn't match the expected gh-readonly-queue/.../pr-N-... pattern; skipping."
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+          fi
+          exit 0
+        fi
+
+        # commits/{sha}/pulls is empty for unmerged fork SHAs (same gap
+        # e2e-on-approval-fork.yml works around). List open PRs targeting
+        # main and match head.sha; require a unique match rather than
+        # trusting github.event.workflow_run.pull_requests[], which is
+        # unreliable/empty for genuine cross-fork PRs.
+        if ! prs_json=$(gh api --paginate \
+          "repos/${REPO}/pulls?state=open&base=main&per_page=100" \
+          --jq '.[]' | jq -s '.'); then
+          echo "Failed to list open PRs for ${HEAD_SHA:0:7}; skipping."
+          echo "found=false" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+        pr_json=$(jq -c --arg sha "${HEAD_SHA}" '
+          [.[] | select(.state == "open") | select(.head.sha == $sha)]
+          | if length == 1 then .[0] else empty end
+        ' <<<"${prs_json}")
+        if [[ -z "${pr_json}" || "${pr_json}" == "null" ]]; then
+          echo "No unique open PR at ${HEAD_SHA:0:7}; skipping (stale head, or not a PR run)."
+          echo "found=false" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+        echo "found=true" >> "${GITHUB_OUTPUT}"
+        echo "number=$(jq -r '.number' <<<"${pr_json}")" >> "${GITHUB_OUTPUT}"

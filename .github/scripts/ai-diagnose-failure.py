@@ -66,8 +66,22 @@ GOOGLE_CLOUD_PROJECT = os.environ["GOOGLE_CLOUD_PROJECT"]
 GOOGLE_CLOUD_LOCATION = os.environ["GOOGLE_CLOUD_LOCATION"]
 # Must be a key in GEMINI_PRICING_USD_PER_MILLION below, or the cost estimate
 # in the confidence/cost footer degrades to "unavailable" rather than silently
-# costing against the wrong model's rate -- see format_cost_line.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+# costing against the wrong model's rate -- see format_cost_line. Both this
+# and GEMINI_FALLBACK_MODEL below currently require GOOGLE_CLOUD_LOCATION to
+# be "global" -- confirmed live against the osac-ci project that neither
+# gemini-3.1-pro-preview nor gemini-3.7-flash resolve on us-central1 (or any
+# other region tried), only global; see vertex-ai-auth's own gcp-location
+# default. gemini-2.5-pro (the previous default) retires October 16, 2026
+# regardless of the reliability issues that motivated moving off it early.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
+# Tried only after GEMINI_MODEL has exhausted MAX_RETRIES with nothing
+# usable (see call_gemini) -- a different model/serving path is the actual
+# mitigation for the empty-response quirk documented at MAX_RETRIES above,
+# since it's reported to be a cyclical, hours-long, per-model backend issue
+# that more retries on the SAME model can't reliably outlast. Set to the
+# empty string to disable the fallback tier entirely and match the old
+# single-model behavior.
+GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.7-flash")
 SUMMARY_PATH = os.environ.get("GITHUB_STEP_SUMMARY", "")
 # Set by callers that need the raw diagnosis text outside this job's own step
 # summary -- e.g. ai-diagnostic-e2e.yml runs in a separate workflow_run job
@@ -388,26 +402,46 @@ MAX_LISTED_FILES = 300
 # have room left over regardless of how much the model reasons first.
 MAX_OUTPUT_TOKENS = 65536
 THINKING_BUDGET_TOKENS = 24576
-# How many extra attempts _generate_with_retry makes after an incomplete
-# first response, before giving up -- confirmed live across two separate
-# runs (33965773078, 34119831369) that this is a genuine, recurring Vertex
-# AI/Gemini reliability quirk (finish_reason=STOP, empty text, a tiny
-# fraction of THINKING_BUDGET_TOKENS actually used -- not a token-budget
-# exhaustion issue), not a one-off. Raised from 1: with a transient,
-# probabilistic backend issue, more attempts genuinely improve the odds of
-# eventually getting a real answer instead of a degraded "diagnosis
-# unavailable" Slack post, unlike a deterministic failure (e.g. a content-
-# policy block, handled separately by _is_blocked) where extra attempts
-# just reproduce the same result for the same cost.
-MAX_RETRIES = 5
+# How many extra attempts _generate_with_retry makes on the PRIMARY model
+# after an incomplete first response, before giving up on it and (see
+# call_gemini) falling over to GEMINI_FALLBACK_MODEL -- confirmed live
+# across multiple separate runs (33965773078, 34119831369, and PR #951's
+# run 34796212914 failing 5/5 TWICE in a row) that this is a genuine,
+# recurring Vertex AI/Gemini reliability quirk (finish_reason=STOP, empty
+# text, a tiny fraction of THINKING_BUDGET_TOKENS actually used -- not a
+# token-budget exhaustion issue), not a one-off. Widely reported externally
+# too (e.g. https://discuss.ai.google.dev/t/gemini-2-5-pro-with-empty-
+# response-text/81175) as a Google-side, cyclical/intermittent backend
+# issue lasting hours at a time for a given model -- which is exactly why
+# more retries on the SAME model has a real ceiling (see PR #951: 10
+# straight empty responses) and a fallback to a DIFFERENT model (different
+# serving path, not sharing the same outage window) is the actual fix for
+# "zero tolerance for unavailable", not just more attempts on one model.
+# Raised from 5 (originally raised from 1): with a transient, probabilistic
+# backend issue, more attempts genuinely improve the odds of succeeding
+# before ever needing the fallback tier, unlike a deterministic failure
+# (e.g. a content-policy block, handled separately by _is_blocked) where
+# extra attempts just reproduce the same result for the same cost.
+MAX_RETRIES = 7
+# Retries _generate_with_retry makes on GEMINI_FALLBACK_MODEL, once the
+# primary model has already exhausted MAX_RETRIES with nothing usable.
+# Deliberately fewer than MAX_RETRIES: by this point the primary model has
+# already spent a real retry budget, and the fallback exists to try a
+# DIFFERENT, independent failure domain rather than to out-stubborn the
+# same one -- a handful of attempts is enough to absorb its own transient
+# blips without doubling this job's worst-case wall-clock time on top of
+# the primary's own budget (see the diagnose job's timeout-minutes, sized
+# to cover both tiers).
+FALLBACK_MAX_RETRIES = 3
 # Exponential backoff between retries -- a short pause gives a transient,
 # probabilistic backend issue (a specific overloaded replica, a brief
 # capacity blip) more room to clear before hitting it again, rather than
 # hammering the same failure mode back-to-back with no delay at all.
-# Capped so a worst-case run of MAX_RETRIES failures doesn't add an
-# unbounded amount of wall-clock time on top of an already-failed E2E job.
-RETRY_BACKOFF_BASE_SECONDS = 2
-RETRY_BACKOFF_MAX_SECONDS = 30
+# Capped so a worst-case run doesn't add an unbounded amount of wall-clock
+# time on top of an already-failed E2E job. Shared by both retry tiers
+# (primary and fallback) -- only the attempt COUNT differs between them.
+RETRY_BACKOFF_BASE_SECONDS = 3
+RETRY_BACKOFF_MAX_SECONDS = 45
 # The bar a diagnosis must clear before it's presented as definitive, rather
 # than deferring to "go check the logs yourself" -- see CONFIDENCE_PATTERN.
 # Raised from 85: real artifacts are often dominated by noise unrelated to
@@ -852,6 +886,11 @@ def format_confidence_line(confidence):
 # "unavailable" in format_cost_line rather than silently costing against the
 # wrong model's rate.
 GEMINI_PRICING_USD_PER_MILLION = {
+    # Kept even though no longer the default (GEMINI_MODEL moved to
+    # gemini-3.1-pro-preview) -- both retire October 16, 2026 but remain
+    # valid, explicitly-selectable GEMINI_MODEL/GEMINI_FALLBACK_MODEL
+    # values until then, and format_cost_line needs their pricing row
+    # whenever a caller does select them.
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
     "gemini-2.5-pro": {
         "input": 1.25,
@@ -860,6 +899,18 @@ GEMINI_PRICING_USD_PER_MILLION = {
         "tiered_input": 2.50,
         "tiered_output": 15.00,
     },
+    "gemini-3.1-pro-preview": {
+        "input": 2.00,
+        "output": 12.00,
+        "tiered_input_threshold_tokens": 200_000,
+        "tiered_input": 4.00,
+        "tiered_output": 18.00,
+    },
+    # Introductory pricing (confirmed directly on the osac-ci Model Garden
+    # listing, September 2026): "half the original 3.6 Flash cost...
+    # available through the end of the year". Doubles to $1.50/$7.50 on
+    # 2027-01-01 per that same listing -- update this row then.
+    "gemini-3.7-flash": {"input": 0.75, "output": 3.75},
 }
 
 
@@ -974,6 +1025,34 @@ def aggregate_cost(usage_metadata_list, model):
     if not cost_known:
         return None, total_input_tokens, total_output_tokens
     return total_cost, total_input_tokens, total_output_tokens
+
+
+def _merge_cost_tuples(a, b):
+    """Combine two (cost_usd, input_tokens, output_tokens) tuples -- each
+    normally an aggregate_cost() result -- into one total. Used when a
+    single diagnosis spans two models (the primary exhausted its retries,
+    then a fallback model was tried too): the fallback's own attempts are
+    billed at its own rate via a separate aggregate_cost call, and this
+    merges that in with the primary tier's already-computed total rather
+    than silently dropping the primary's real, already-incurred cost.
+
+    None propagates the same way aggregate_cost's own None does: if
+    NEITHER side has usable token counts, the merged result is fully
+    unknown. If a side has token counts but its cost is unknown (missing
+    pricing for that model), the merged cost is unknown too -- reporting
+    only the other side's cost as if it were the total would understate
+    real spend, the same failure mode compute_cost/aggregate_cost already
+    avoid for a single model.
+    """
+    cost_a, input_a, output_a = a
+    cost_b, input_b, output_b = b
+    if input_a is None and input_b is None:
+        return None, None, None
+    input_tokens = (input_a or 0) + (input_b or 0)
+    output_tokens = (output_a or 0) + (output_b or 0)
+    if (input_a is not None and cost_a is None) or (input_b is not None and cost_b is None):
+        return None, input_tokens, output_tokens
+    return (cost_a or 0.0) + (cost_b or 0.0), input_tokens, output_tokens
 
 
 def format_cost_line(cost_usd, input_tokens, output_tokens, model):
@@ -1238,20 +1317,28 @@ _RETRY_PROMPT = (
 )
 
 
-def _generate_with_retry(chat, prompt):
-    """Send `prompt`, retrying up to MAX_RETRIES times with a follow-up
+def _generate_with_retry(chat, prompt, max_retries=MAX_RETRIES):
+    """Send `prompt`, retrying up to `max_retries` times with a follow-up
     turn each time if the response is incomplete (see _is_incomplete: it
     hit max_output_tokens, or it came back with no text at all for some
     other, non-blocked reason). Waits an exponentially increasing,
     capped delay (RETRY_BACKOFF_BASE_SECONDS/RETRY_BACKOFF_MAX_SECONDS)
     before each retry.
 
+    Model-agnostic on purpose: `chat` already carries whichever model it
+    was created with (see call_gemini), so this same function is what
+    drives BOTH the primary-model retry loop and the fallback-model retry
+    loop (just called twice, with different `chat`/`max_retries` values,
+    from call_gemini) -- one retry-and-backoff implementation, not two
+    near-duplicate copies that could drift out of sync with each other.
+
     A fresh turn gets its own full max_output_tokens budget again, and the
     model already has every read_artifact_file call's evidence sitting in
     this same chat's history -- asking it to actually produce a complete
     answer from what it already gathered is a real repair, not just a
     relabeled failure. Multiple retries (not just one) because this has
-    now been confirmed live, twice (runs 33965773078, 34119831369), as a
+    now been confirmed live, repeatedly (runs 33965773078, 34119831369,
+    and PR #951's run 34796212914 failing 5/5 twice in a row), as a
     genuine transient/probabilistic Vertex AI reliability quirk rather
     than a deterministic one -- each additional attempt gets a real,
     independent chance at succeeding, unlike retrying a deterministic
@@ -1263,8 +1350,9 @@ def _generate_with_retry(chat, prompt):
     only if the response being returned is STILL bad after every retry
     (or a retry was skipped as pointless) -- the caller uses this to flag
     the diagnosis explicitly rather than silently presenting a bad answer
-    as a complete one. `usage_metadata_list` carries every attempt
-    actually made (one entry, or up to 1 + MAX_RETRIES if every retry was
+    as a complete one, and (in call_gemini) to decide whether to fall
+    back to a different model. `usage_metadata_list` carries every attempt
+    actually made (one entry, or up to 1 + max_retries if every retry was
     needed) so the caller can add up the REAL total cost across attempts
     -- see aggregate_cost's docstring for why the final attempt's
     usage_metadata alone would silently drop an earlier attempt's
@@ -1279,11 +1367,11 @@ def _generate_with_retry(chat, prompt):
     if _is_blocked(resp):
         return resp, True, usage_metadata_list
 
-    for attempt_num in range(1, MAX_RETRIES + 1):
+    for attempt_num in range(1, max_retries + 1):
         delay = min(RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt_num - 1)), RETRY_BACKOFF_MAX_SECONDS)
         _safe_print(
             f"WARNING: Gemini's response was incomplete ({_describe_empty_response(attempts[-1])}); "
-            f"retrying (attempt {attempt_num}/{MAX_RETRIES}) after a {delay}s backoff.",
+            f"retrying (attempt {attempt_num}/{max_retries}) after a {delay}s backoff.",
             file=sys.stderr,
         )
         time.sleep(delay)
@@ -1308,7 +1396,7 @@ def _generate_with_retry(chat, prompt):
             return final_resp, True, usage_metadata_list
 
     _safe_print(
-        f"WARNING: All {MAX_RETRIES} retries were also incomplete "
+        f"WARNING: All {max_retries} retries were also incomplete "
         f"({_describe_empty_response(attempts[-1])}); giving up.",
         file=sys.stderr,
     )
@@ -1334,21 +1422,64 @@ def call_gemini(prompt, artifact_dir):
     client = genai.Client(
         vertexai=True, project=GOOGLE_CLOUD_PROJECT, location=GOOGLE_CLOUD_LOCATION
     )
+
     # Automatic function calling: the SDK handles the request/read/respond
-    # loop internally, capped at MAX_TOOL_CALLS round trips, so this is
-    # still a single logical call from main()'s perspective.
-    chat = client.chats.create(
-        model=GEMINI_MODEL,
-        config=types.GenerateContentConfig(
-            tools=[make_read_artifact_file_tool(artifact_dir)],
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                maximum_remote_calls=MAX_TOOL_CALLS
+    # loop internally, capped at MAX_TOOL_CALLS round trips, so each call
+    # this returns is still a single logical turn from _generate_with_
+    # retry's (and this function's) perspective. Factored out so the same
+    # config is used for both the primary and fallback model's chat --
+    # only `model` differs between them.
+    def make_chat(model):
+        return client.chats.create(
+            model=model,
+            config=types.GenerateContentConfig(
+                tools=[make_read_artifact_file_tool(artifact_dir)],
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    maximum_remote_calls=MAX_TOOL_CALLS
+                ),
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+                thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET_TOKENS),
             ),
-            max_output_tokens=MAX_OUTPUT_TOKENS,
-            thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET_TOKENS),
-        ),
-    )
-    resp, incomplete, usage_metadata_list = _generate_with_retry(chat, prompt)
+        )
+
+    chat = make_chat(GEMINI_MODEL)
+    resp, incomplete, usage_metadata_list = _generate_with_retry(chat, prompt, max_retries=MAX_RETRIES)
+    model_used = GEMINI_MODEL
+    fallback_usage_metadata_list = []
+
+    # GEMINI_MODEL exhausted every retry with nothing usable -- try a
+    # SECOND, independent model rather than giving up. This is the actual
+    # mitigation for the reliability quirk MAX_RETRIES documents (a
+    # cyclical, hours-long, per-model backend issue): more retries on the
+    # same model just keep hitting the same outage window, but a
+    # different model is a different serving path that, empirically, is
+    # very unlikely to be down for the exact same reason at the exact
+    # same moment. Skipped when GEMINI_FALLBACK_MODEL is unset/blank or
+    # identical to GEMINI_MODEL (nothing new to try).
+    if incomplete and GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
+        _safe_print(
+            f"WARNING: {GEMINI_MODEL} exhausted every retry with nothing usable; "
+            f"falling back to {GEMINI_FALLBACK_MODEL}.",
+            file=sys.stderr,
+        )
+        fallback_chat = make_chat(GEMINI_FALLBACK_MODEL)
+        fallback_resp, fallback_incomplete, fallback_usage_metadata_list = _generate_with_retry(
+            fallback_chat, prompt, max_retries=FALLBACK_MAX_RETRIES
+        )
+        # Prefer the fallback's answer whenever it produced ANY real
+        # text, even if still flagged incomplete (e.g. truncated) --
+        # partial text from a second, independent model beats an
+        # entirely empty primary response. Only keep the primary's
+        # (already-empty, since we're in this branch) response if the
+        # fallback ALSO came back with nothing at all.
+        if fallback_resp.text or not resp.text:
+            resp, incomplete, chat, model_used = (
+                fallback_resp,
+                fallback_incomplete,
+                fallback_chat,
+                GEMINI_FALLBACK_MODEL,
+            )
+
     if resp.text:
         text = resp.text
     else:
@@ -1363,9 +1494,20 @@ def call_gemini(prompt, artifact_dir):
         tool_calls = count_tool_calls(chat)
         # Sums every attempt's own usage_metadata (see aggregate_cost's
         # docstring) so a retry's real, already-incurred first-attempt
-        # cost is never silently dropped from the reported total.
+        # cost is never silently dropped from the reported total. When a
+        # fallback model was also tried, its attempts are billed at ITS
+        # own rate and merged in via _merge_cost_tuples -- the primary
+        # model's exhausted-retry attempts cost real money too, even
+        # though its response wasn't the one used.
         cost_usd, input_tokens, output_tokens = aggregate_cost(usage_metadata_list, GEMINI_MODEL)
-        cost_line = format_cost_line(cost_usd, input_tokens, output_tokens, GEMINI_MODEL)
+        model_label = model_used
+        if fallback_usage_metadata_list:
+            fallback_cost = aggregate_cost(fallback_usage_metadata_list, GEMINI_FALLBACK_MODEL)
+            cost_usd, input_tokens, output_tokens = _merge_cost_tuples(
+                (cost_usd, input_tokens, output_tokens), fallback_cost
+            )
+            model_label = f"{GEMINI_MODEL} -> {GEMINI_FALLBACK_MODEL}"
+        cost_line = format_cost_line(cost_usd, input_tokens, output_tokens, model_label)
         if tool_calls:
             tool_calls_text = f"{tool_calls} tool call{'s' if tool_calls != 1 else ''}"
             # Combined into the cost line when usage data is available

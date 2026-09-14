@@ -1,0 +1,208 @@
+---
+# Posts (or updates) a "⏳ Running" placeholder into the same sticky PR
+# comment ai-diagnostic-e2e.yml maintains, as soon as an E2E suite is
+# REQUESTED (not completed) -- so anyone watching a PR sees "tests are
+# running" right away, in the same place the eventual pass/fail/diagnosis
+# result will land, instead of only finding out minutes-to-hours later
+# once something fails (or never finding out at all for a passing run,
+# since previously nothing was posted unless a failure happened at least
+# once, so an easy-to-miss silence was the normal case). Overwriting an
+# older section on a new push/rerun is intentional, not a race to guard
+# against: a new "requested" event only ever means a genuinely new attempt
+# is starting, for which "Running" (replacing whatever the PREVIOUS
+# attempt's result said) is exactly the right thing to show.
+#
+# ai-diagnostic-e2e.yml's own diagnose/comment-success jobs overwrite this
+# SAME section once the suite actually finishes (with a real diagnosis,
+# "✅ Passing", or -- if the suite never even reached the real full-install
+# job, e.g. blocked by e2e-readiness -- "ℹ️ Skipped"); see comment-
+# success's own header comment there for that last case, which exists
+# specifically because of this file: without it, a suite that never
+# reaches full-install would be stuck showing "Running" forever.
+#
+# Deliberately its own file, not folded into ai-diagnostic-e2e.yml: that
+# file's name and everything in it is specifically about diagnosing E2E
+# FAILURES. Shares its actual mechanics (PR resolution, minted bot token,
+# sticky-comment upsert) via the same resolve-pr-from-head-sha composite
+# action and upsert-pr-comment.py script rather than duplicating either.
+name: Reserve E2E comment slot on start
+
+on:
+  workflow_run:  # zizmor: ignore[dangerous-triggers] -- same reasoning as ai-diagnostic-e2e.yml: no PR-head checkout; only trusted SHA-pinned/local composite actions; untrusted event data via env:, never interpolated into run: bodies.
+    workflows:
+      - E2E CaaS Full Install
+      - E2E BMaaS Full Install
+      - E2E VMaaS Full Install
+    types: [requested]
+  workflow_call:
+    secrets:
+      OSAC_AI_APP_ID:
+        description: The OSAC AI GitHub App's numeric ID.
+        required: true
+      OSAC_AI_APP_PRIVATE_KEY:
+        description: The OSAC AI GitHub App's PEM private key.
+        required: true
+
+# Same group as ai-diagnostic-e2e.yml, deliberately: both workflows edit
+# the SAME sticky comment for the SAME PR, so they must serialize against
+# EACH OTHER too, not just against themselves -- otherwise this job and a
+# diagnose/comment-success run could race to read-modify-write the same
+# comment body and one of their edits could be silently lost. See that
+# file's own concurrency comment for the full reasoning (queue: max, why
+# head_repo+head_branch and not workflow_run.id/head_sha).
+concurrency:
+  group: ai-diagnostic-e2e-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+  queue: max
+
+permissions: {}
+
+jobs:
+  reserve:
+    name: Reserve comment slot
+    if: >-
+      github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read       # checkout this repo's own default-branch composite action + script only
+      pull-requests: read  # resolve-pr-from-head-sha's own PR lookup
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # job.workflow_repository/job.workflow_sha (not github.repository/
+          # github.sha, and not a bare `repository: osac-project/osac-test-
+          # infra` defaulting to whatever's on the default branch AT
+          # CHECKOUT TIME) -- these resolve to the exact repo/commit that
+          # defines THIS running reusable workflow, for both native
+          # (workflow_run) and cross-repo (workflow_call from osac's
+          # wrapper) invocation alike (see e2e-on-label.yml's identical
+          # use for the same reasoning). A bare default-branch checkout
+          # could pull a NEWER commit than the one `uses: ...@main`
+          # actually pinned this run to if main moved in between, silently
+          # running this workflow's logic against a mismatched version of
+          # the local composite action/script it's about to call.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Resolve PR from head SHA
+        id: pr
+        uses: ./.github/actions/resolve-pr-from-head-sha
+        with:
+          repo: ${{ github.repository }}
+          head-sha: ${{ github.event.workflow_run.head_sha }}
+          event-name: ${{ github.event.workflow_run.event }}
+          head-branch: ${{ github.event.workflow_run.head_branch }}
+          github-token: ${{ github.token }}
+
+      # Same reasoning as ai-diagnostic-e2e.yml's own copy of this step --
+      # a GitHub App installation token rather than GITHUB_TOKEN, so this
+      # always shows up under the same stable, recognizable bot identity
+      # (osac-ai[bot]) the eventual diagnosis/pass/skip edit will also use
+      # (and so the author-match check in "Find existing diagnostic
+      # comment" below actually matches across both workflows).
+      - name: Mint OSAC AI bot token
+        id: mint-ai-token
+        if: steps.pr.outputs.found == 'true'
+        uses: ./.github/actions/mint-github-app-token
+        with:
+          app-id: ${{ secrets.OSAC_AI_APP_ID }}
+          private-key: ${{ secrets.OSAC_AI_APP_PRIVATE_KEY }}
+          account-login: osac-project
+          repositories: osac,osac-test-infra
+          permissions: '{"issues":"write","pull_requests":"write"}'
+
+      # Same identity/author-check reasoning as ai-diagnostic-e2e.yml's own
+      # copy of this step -- see there for the full explanation.
+      - name: Find existing diagnostic comment
+        id: comment
+        if: steps.pr.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ steps.mint-ai-token.outputs.token }}
+          BOT_LOGIN: ${{ steps.mint-ai-token.outputs.bot-login }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          bot_login="${BOT_LOGIN}"
+          BODY_FILE="${RUNNER_TEMP}/existing-comment-body.md"
+          comments_json=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" --jq '.[] | {id, body, user: .user.login}' | jq -s '.')
+          comment_id=$(jq -r --arg bot "${bot_login}" '
+            [.[] | select(.user == $bot) | select(.body | startswith("<!-- osac-ai-diagnostic-comment -->"))]
+            | if length > 0 then .[0].id else empty end
+          ' <<<"${comments_json}")
+          if [[ -n "${comment_id}" ]]; then
+            jq -r --arg id "${comment_id}" '.[] | select((.id|tostring) == $id) | .body' <<<"${comments_json}" > "${BODY_FILE}"
+            echo "id=${comment_id}" >> "${GITHUB_OUTPUT}"
+          else
+            : > "${BODY_FILE}"
+            echo "id=" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "body-file=${BODY_FILE}" >> "${GITHUB_OUTPUT}"
+
+      # Unlike diagnose/comment-success (which only ever edit an existing
+      # comment, never create one just to say "fine" or "skipped"), this
+      # step posts UNCONDITIONALLY whenever a PR was resolved -- creating
+      # the sticky comment fresh if it doesn't exist yet is the whole
+      # point of this file: a PR that's never failed previously got no
+      # comment at all; now it gets "Running" immediately, then "Passing"
+      # once done.
+      - name: Prepare comment section
+        id: section
+        if: steps.pr.outputs.found == 'true'
+        env:
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          set -euo pipefail
+          SECTION_FILE="${RUNNER_TEMP}/comment-section.md"
+          # Plain bold header, not <sub>-wrapped -- same style as
+          # comment-success's own "✅ ... Passing"/"ℹ️ ... Skipped"
+          # sections, which this one is directly superseded by.
+          {
+            echo "**⏳ ${WORKFLOW_NAME} -- Running**"
+            echo
+            echo "[Follow along](${RUN_URL})."
+          } > "${SECTION_FILE}"
+          echo "section-file=${SECTION_FILE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build updated comment body
+        id: body
+        if: steps.pr.outputs.found == 'true'
+        env:
+          CURRENT_BODY_FILE: ${{ steps.comment.outputs.body-file }}
+          SECTION_KEY: ${{ github.event.workflow_run.name }}
+          SECTION_CONTENT_FILE: ${{ steps.section.outputs.section-file }}
+          OUTPUT_BODY_FILE: ${{ runner.temp }}/new-comment-body.md
+          # No RUN_COST_USD/RUN_INPUT_TOKENS/RUN_OUTPUT_TOKENS -- this job
+          # never runs a diagnosis, so there's no new cost to add.
+          # upsert-pr-comment.py carries any existing running total
+          # forward unchanged when these are absent.
+        run: python3 .github/scripts/upsert-pr-comment.py
+
+      - name: Upsert PR comment
+        if: steps.pr.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ steps.mint-ai-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          COMMENT_ID: ${{ steps.comment.outputs.id }}
+        run: |
+          set -euo pipefail
+          # Re-check right before mutating -- see ai-diagnostic-e2e.yml's
+          # own copy of this same guard for the full reasoning (resolve
+          # ran potentially seconds-to-minutes ago; the PR could have
+          # merged/closed since).
+          pr_state=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.state' 2>/dev/null || echo "unknown")
+          if [[ "${pr_state}" != "open" ]]; then
+            echo "PR #${PR_NUMBER} is no longer open (state: ${pr_state}); skipping comment."
+            exit 0
+          fi
+          BODY_FILE="${RUNNER_TEMP}/new-comment-body.md"
+          if [[ -n "${COMMENT_ID}" ]]; then
+            jq -Rs '{body: .}' < "${BODY_FILE}" | gh api "repos/${REPO}/issues/comments/${COMMENT_ID}" -X PATCH --input -
+          else
+            jq -Rs '{body: .}' < "${BODY_FILE}" | gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --input -
+          fi

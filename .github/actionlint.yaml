@@ -42,3 +42,15 @@ paths:
       # Confirmed real and working at runtime; drop this once actionlint's
       # schema catches up.
       - 'unexpected key "queue" for "concurrency" section'
+      # Same job.workflow_repository/job.workflow_sha gap as
+      # e2e-on-label.yml above, same reasoning -- see that entry.
+      - 'property "workflow_(repository|sha)" is not defined'
+  .github/workflows/e2e-reserve-comment-on-start.yml:
+    ignore:
+      # Same concurrency.queue gap, same reasoning -- this file shares
+      # ai-diagnostic-e2e.yml's own concurrency.group deliberately (see
+      # that key's comment there), so it needs the identical ignore.
+      - 'unexpected key "queue" for "concurrency" section'
+      # Same job.workflow_repository/job.workflow_sha gap as
+      # e2e-on-label.yml above, same reasoning -- see that entry.
+      - 'property "workflow_(repository|sha)" is not defined'

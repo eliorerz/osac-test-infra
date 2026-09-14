@@ -16,6 +16,7 @@ module load time, so these tests never need real Vertex AI credentials).
 """
 import importlib.util
 import os
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -330,6 +331,181 @@ class GenerateWithRetryTests(unittest.TestCase):
         self.assertEqual(resp.text, "a partial but real answer")
         self.assertEqual(chat.calls, ai_diagnose_failure.MAX_RETRIES + 1)
 
+    def test_custom_max_retries_is_respected(self):
+        # call_gemini's fallback-model tier passes a smaller max_retries
+        # (FALLBACK_MAX_RETRIES) than the primary tier's module-default
+        # MAX_RETRIES -- confirm the parameter actually bounds the retry
+        # count rather than the function always falling back to the
+        # module global.
+        custom_max_retries = 2
+        chat = FakeChat([_fake_resp("") for _ in range(custom_max_retries + 1)])
+        resp, incomplete, usage = ai_diagnose_failure._generate_with_retry(
+            chat, "prompt", max_retries=custom_max_retries
+        )
+        self.assertEqual(chat.calls, custom_max_retries + 1)
+        self.assertTrue(incomplete)
+        self.assertEqual(len(usage), custom_max_retries + 1)
+
+    def test_custom_max_retries_still_stops_early_on_success(self):
+        chat = FakeChat([_fake_resp(""), _fake_resp("real answer")])
+        resp, incomplete, usage = ai_diagnose_failure._generate_with_retry(
+            chat, "prompt", max_retries=ai_diagnose_failure.FALLBACK_MAX_RETRIES
+        )
+        self.assertEqual(chat.calls, 2)
+        self.assertFalse(incomplete)
+        self.assertEqual(resp.text, "real answer")
+
+
+class MergeCostTuplesTests(unittest.TestCase):
+    """_merge_cost_tuples combines a primary-model and fallback-model
+    aggregate_cost() result into one total -- used only when call_gemini
+    actually invoked the fallback tier.
+    """
+
+    def test_both_fully_known(self):
+        cost, input_tokens, output_tokens = ai_diagnose_failure._merge_cost_tuples(
+            (1.0, 100, 200), (0.5, 50, 75)
+        )
+        self.assertAlmostEqual(cost, 1.5)
+        self.assertEqual(input_tokens, 150)
+        self.assertEqual(output_tokens, 275)
+
+    def test_both_sides_none_stays_none(self):
+        result = ai_diagnose_failure._merge_cost_tuples((None, None, None), (None, None, None))
+        self.assertEqual(result, (None, None, None))
+
+    def test_one_side_none_keeps_the_other(self):
+        cost, input_tokens, output_tokens = ai_diagnose_failure._merge_cost_tuples(
+            (None, None, None), (2.0, 10, 20)
+        )
+        self.assertAlmostEqual(cost, 2.0)
+        self.assertEqual(input_tokens, 10)
+        self.assertEqual(output_tokens, 20)
+
+    def test_unknown_pricing_on_either_side_makes_cost_unknown_but_keeps_tokens(self):
+        # A side with real token counts but no cost (missing pricing row)
+        # must make the MERGED cost unknown too -- reporting only the
+        # other side's cost would understate real spend, not just be
+        # incomplete.
+        cost, input_tokens, output_tokens = ai_diagnose_failure._merge_cost_tuples(
+            (None, 100, 200), (5.0, 10, 20)
+        )
+        self.assertIsNone(cost)
+        self.assertEqual(input_tokens, 110)
+        self.assertEqual(output_tokens, 220)
+
+
+class CallGeminiFallbackTests(unittest.TestCase):
+    """call_gemini()'s own orchestration -- specifically, whether it
+    actually falls over to GEMINI_FALLBACK_MODEL when the primary model
+    exhausts every retry -- isn't exercised by GenerateWithRetryTests
+    (which only drives _generate_with_retry directly against one chat).
+    Its google.genai import is deferred and real credentials are never
+    available in this suite, so these tests inject fake `google`/
+    `google.genai`/`google.genai.types` modules via sys.modules: enough
+    for call_gemini to run its real control flow end to end (model
+    selection, retry budgets per tier) without ever touching the real SDK
+    or network.
+    """
+
+    def setUp(self):
+        self.sleep_patcher = mock.patch.object(ai_diagnose_failure.time, "sleep")
+        self.sleep_patcher.start()
+        self.addCleanup(self.sleep_patcher.stop)
+
+        self._chats_to_create = []
+        self.created_chats = []
+
+        outer = self
+
+        class FakeChats:
+            def create(self, model, config):  # noqa: ANN001 -- matches genai's own signature
+                chat = outer._chats_to_create.pop(0)
+                chat.model = model
+                outer.created_chats.append(chat)
+                return chat
+
+        class FakeClient:
+            def __init__(self, vertexai, project, location):  # noqa: ANN001
+                self.chats = FakeChats()
+
+        fake_types = SimpleNamespace(
+            GenerateContentConfig=lambda **kw: SimpleNamespace(**kw),
+            AutomaticFunctionCallingConfig=lambda **kw: SimpleNamespace(**kw),
+            ThinkingConfig=lambda **kw: SimpleNamespace(**kw),
+        )
+        fake_genai = SimpleNamespace(Client=FakeClient, types=fake_types)
+        fake_google = SimpleNamespace(genai=fake_genai)
+
+        self.modules_patcher = mock.patch.dict(
+            sys.modules,
+            {
+                "google": fake_google,
+                "google.genai": fake_genai,
+                "google.genai.types": fake_types,
+            },
+        )
+        self.modules_patcher.start()
+        self.addCleanup(self.modules_patcher.stop)
+
+    def _queue_chat(self, responses):
+        self._chats_to_create.append(FakeChat(responses))
+
+    def test_falls_back_when_primary_exhausted(self):
+        self._queue_chat([_fake_resp("") for _ in range(ai_diagnose_failure.MAX_RETRIES + 1)])
+        self._queue_chat(
+            [_fake_resp("**Category:** `TEST_FLAKE`\n\nfallback answer\n\n**Confidence:** 80%")]
+        )
+        diagnosis, category, _cost, _in_tok, _out_tok, incomplete = ai_diagnose_failure.call_gemini(
+            "prompt", "/tmp/nonexistent-artifact-dir"
+        )
+        self.assertFalse(incomplete)
+        self.assertIn("fallback answer", diagnosis)
+        self.assertEqual(category, "TEST_FLAKE")
+        self.assertEqual(len(self.created_chats), 2)
+        self.assertEqual(self.created_chats[0].model, ai_diagnose_failure.GEMINI_MODEL)
+        self.assertEqual(self.created_chats[1].model, ai_diagnose_failure.GEMINI_FALLBACK_MODEL)
+
+    def test_no_fallback_needed_when_primary_succeeds(self):
+        self._queue_chat(
+            [_fake_resp("**Category:** `OSAC_AAP`\n\nprimary answer\n\n**Confidence:** 90%")]
+        )
+        diagnosis, category, _cost, _in_tok, _out_tok, incomplete = ai_diagnose_failure.call_gemini(
+            "prompt", "/tmp/nonexistent-artifact-dir"
+        )
+        self.assertFalse(incomplete)
+        self.assertIn("primary answer", diagnosis)
+        # Only the primary chat should ever have been created -- a
+        # successful first attempt must never pay for a fallback call it
+        # doesn't need.
+        self.assertEqual(len(self.created_chats), 1)
+
+    def test_fallback_respects_its_own_smaller_retry_budget(self):
+        self._queue_chat([_fake_resp("") for _ in range(ai_diagnose_failure.MAX_RETRIES + 1)])
+        self._queue_chat([_fake_resp("") for _ in range(ai_diagnose_failure.FALLBACK_MAX_RETRIES + 1)])
+        _diagnosis, _category, _cost, _in_tok, _out_tok, incomplete = ai_diagnose_failure.call_gemini(
+            "prompt", "/tmp/nonexistent-artifact-dir"
+        )
+        self.assertTrue(incomplete)
+        self.assertEqual(self.created_chats[0].calls, ai_diagnose_failure.MAX_RETRIES + 1)
+        self.assertEqual(self.created_chats[1].calls, ai_diagnose_failure.FALLBACK_MAX_RETRIES + 1)
+
+    def test_both_tiers_exhausted_still_prefers_any_real_text(self):
+        # Primary has a real (if incomplete) partial answer; fallback
+        # comes back fully empty. The primary's partial text must win --
+        # matches _generate_with_retry's own "prefer last attempt with
+        # real text" behavior, just applied across tiers now too.
+        self._queue_chat(
+            [_fake_resp("partial primary text", finish_reason="MAX_TOKENS")]
+            + [_fake_resp("") for _ in range(ai_diagnose_failure.MAX_RETRIES)]
+        )
+        self._queue_chat([_fake_resp("") for _ in range(ai_diagnose_failure.FALLBACK_MAX_RETRIES + 1)])
+        diagnosis, _category, _cost, _in_tok, _out_tok, incomplete = ai_diagnose_failure.call_gemini(
+            "prompt", "/tmp/nonexistent-artifact-dir"
+        )
+        self.assertTrue(incomplete)
+        self.assertIn("partial primary text", diagnosis)
+
 
 _FULL_DIAGNOSIS = """### Root cause
 The storage-tier test failed because the CSI driver never provisioned the PVC in time.
@@ -390,6 +566,51 @@ class SplitSectionsTests(unittest.TestCase):
         self.assertEqual(summary, "Something broke.")
         self.assertEqual(causal_chain, "- a\n- b")
         self.assertIsNone(evidence)
+
+
+class ComputeCostNewModelsTests(unittest.TestCase):
+    """Sanity checks that the pricing rows for the current default
+    (gemini-3.1-pro-preview) and fallback (gemini-3.7-flash) models are
+    wired correctly -- the retired gemini-2.5-* rows are covered
+    implicitly by every pre-existing cost in this file's fixtures/
+    docstrings and are kept in GEMINI_PRICING_USD_PER_MILLION on purpose
+    in case they're selected again before their October 2026 retirement.
+    """
+
+    def test_gemini_3_1_pro_preview_base_tier(self):
+        usage = SimpleNamespace(
+            prompt_token_count=1000,
+            candidates_token_count=500,
+            tool_use_prompt_token_count=0,
+            thoughts_token_count=0,
+        )
+        cost, input_tokens, output_tokens = ai_diagnose_failure.compute_cost(usage, "gemini-3.1-pro-preview")
+        self.assertEqual(input_tokens, 1000)
+        self.assertEqual(output_tokens, 500)
+        # 1000/1e6 * 2.00 + 500/1e6 * 12.00
+        self.assertAlmostEqual(cost, 1000 / 1_000_000 * 2.00 + 500 / 1_000_000 * 12.00)
+
+    def test_gemini_3_1_pro_preview_tiered_rate_above_threshold(self):
+        usage = SimpleNamespace(
+            prompt_token_count=250_000,
+            candidates_token_count=1000,
+            tool_use_prompt_token_count=0,
+            thoughts_token_count=0,
+        )
+        cost, input_tokens, output_tokens = ai_diagnose_failure.compute_cost(usage, "gemini-3.1-pro-preview")
+        # Over the 200K threshold -- billed at the tiered rate for the
+        # WHOLE request, same tiering behavior as gemini-2.5-pro.
+        self.assertAlmostEqual(cost, 250_000 / 1_000_000 * 4.00 + 1000 / 1_000_000 * 18.00)
+
+    def test_gemini_3_7_flash_flat_rate(self):
+        usage = SimpleNamespace(
+            prompt_token_count=2000,
+            candidates_token_count=800,
+            tool_use_prompt_token_count=0,
+            thoughts_token_count=0,
+        )
+        cost, input_tokens, output_tokens = ai_diagnose_failure.compute_cost(usage, "gemini-3.7-flash")
+        self.assertAlmostEqual(cost, 2000 / 1_000_000 * 0.75 + 800 / 1_000_000 * 3.75)
 
 
 class CollapseTests(unittest.TestCase):

@@ -24,10 +24,13 @@
 # take (gemini-model) is unrelated to that -- see the workflow_call block
 # below -- and defaults identically whether invoked via workflow_call or
 # natively via workflow_run, since `inputs` is only populated for the
-# former. The "Checkout repository" steps
-# still explicitly pin `repository: osac-project/osac-test-infra` (rather
-# than defaulting to github.repository) so the script/action files
-# themselves are always read from here, never duplicated into a caller.
+# former. The "Checkout repository" steps pin
+# `job.workflow_repository`/`job.workflow_sha` (not github.repository, and
+# not a bare `repository: osac-project/osac-test-infra` defaulting to
+# whatever's on the default branch at checkout time) so the script/action
+# files are always read from the exact commit THIS running workflow was
+# actually invoked from, never duplicated into a caller and never
+# skewed by main moving between invocation and checkout.
 name: AI diagnostic (E2E fork PR failures)
 
 on:
@@ -41,16 +44,35 @@ on:
     inputs:
       gemini-model:
         description: >-
-          Vertex AI Gemini model id to diagnose with, e.g. gemini-2.5-pro or
-          gemini-2.5-flash. Must be a key in ai-diagnose-failure.py's
-          GEMINI_PRICING_USD_PER_MILLION or the cost estimate in the
-          diagnosis footer degrades to "unavailable" rather than silently
-          costing against the wrong model's rate. Optional -- defaults to
-          gemini-2.5-pro (also this file's own default when triggered
-          natively via workflow_run, which never populates `inputs`).
+          Vertex AI Gemini model id to diagnose with, e.g.
+          gemini-3.1-pro-preview or gemini-2.5-pro. Must be a key in
+          ai-diagnose-failure.py's GEMINI_PRICING_USD_PER_MILLION or the
+          cost estimate in the diagnosis footer degrades to "unavailable"
+          rather than silently costing against the wrong model's rate.
+          Requires vertex-ai-auth's gcp-location to actually serve the
+          chosen model -- confirmed live that gemini-3.1-pro-preview and
+          gemini-3.7-flash only resolve on "global" for the osac-ci
+          project, not us-central1 (vertex-ai-auth's own default is
+          "global" for exactly this reason). Optional -- defaults to
+          gemini-3.1-pro-preview (also this file's own default when
+          triggered natively via workflow_run, which never populates
+          `inputs`).
         type: string
         required: false
-        default: gemini-2.5-pro
+        default: gemini-3.1-pro-preview
+      gemini-fallback-model:
+        description: >-
+          Vertex AI Gemini model id to retry with if `gemini-model`
+          exhausts every retry (ai-diagnose-failure.py's MAX_RETRIES)
+          with no usable response -- see GEMINI_FALLBACK_MODEL there for
+          why a different model, not just more retries on the same one,
+          is the actual mitigation for that reliability quirk. Same
+          GEMINI_PRICING_USD_PER_MILLION/location constraints as
+          `gemini-model` above. Optional -- defaults to gemini-3.7-flash;
+          set to an empty string to disable the fallback tier entirely.
+        type: string
+        required: false
+        default: gemini-3.7-flash
     secrets:
       # Credentials for the "OSAC AI" GitHub App (bot identity
       # osac-ai[bot], installed on both osac and osac-test-infra),
@@ -124,91 +146,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      contents: read       # resolve-pr-from-head-sha's commits/{sha} lookup (merge_group PR-batching check), plus checkout below
       pull-requests: read  # list open PRs to resolve head SHA -> PR number
     outputs:
       found: ${{ steps.pr.outputs.found }}
       number: ${{ steps.pr.outputs.number }}
       has-test-evidence: ${{ steps.evidence.outputs.has-test-evidence }}
     steps:
-      - name: Resolve fork PR from head SHA
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # job.workflow_repository/job.workflow_sha (not a bare
+          # `repository: osac-project/osac-test-infra` defaulting to
+          # whatever's on the default branch AT CHECKOUT TIME) pin to the
+          # exact repo/commit that defines THIS running reusable workflow,
+          # for both native (workflow_run) and cross-repo (workflow_call
+          # from osac's wrapper) invocation alike -- see e2e-on-label.yml's
+          # identical use, and e2e-reserve-comment-on-start.yml's own
+          # matching fix, for the same reasoning: a bare default-branch
+          # checkout could pull a NEWER commit than the one `uses:
+          # ...@main` actually pinned this run to if main moved in
+          # between, silently running this workflow's logic (in this job,
+          # the resolve-pr-from-head-sha composite action) against a
+          # mismatched version.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Resolve PR from head SHA
         id: pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          EVENT_NAME: ${{ github.event.workflow_run.event }}
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-        run: |
-          set -euo pipefail
-
-          # merge_group's head_sha is a synthetic merge-queue commit, never
-          # the PR's own head.sha -- the head.sha-matching path below would
-          # never find a match for it regardless of how long we search.
-          # GitHub's merge queue instead encodes the PR number directly in
-          # the temporary branch name it creates (documented format:
-          # gh-readonly-queue/<base>/pr-<number>-<sha>), so parse that
-          # instead. Confirmed live against run 33666352565 on PR #257.
-          if [[ "${EVENT_NAME}" == "merge_group" ]]; then
-            if [[ "${HEAD_BRANCH}" =~ ^gh-readonly-queue/[^/]+/pr-([0-9]+)- ]]; then
-              pr_number="${BASH_REMATCH[1]}"
-              # This repo's merge queue can batch multiple PRs into one
-              # build (grouping_strategy: ALLGREEN, max_entries_to_build: 4
-              # per the ci-status-checks ruleset) -- the branch name only
-              # ever reflects ONE of them, so a batched failure could
-              # actually be caused by a different PR in the same group.
-              # merge_method is SQUASH, and each squashed PR's own
-              # "(#N)" trailer survives into the final commit message, so
-              # count distinct trailers as a proxy for how many PRs this
-              # build actually covers, and skip (rather than guess) if
-              # it's more than the one this branch name names.
-              commit_message=$(gh api "repos/${REPO}/commits/${HEAD_SHA}" --jq '.commit.message' 2>/dev/null || echo "")
-              pr_ref_count=$(grep -oE '\(#[0-9]+\)' <<<"${commit_message}" | sort -u | wc -l)
-              if [[ "${pr_ref_count}" -gt 1 ]]; then
-                echo "Merge group at ${HEAD_SHA:0:7} batches ${pr_ref_count} PRs (multiple '(#N)' trailers in the commit message); skipping rather than attributing this failure to a single PR."
-                echo "found=false" >> "${GITHUB_OUTPUT}"
-                exit 0
-              fi
-              # Confirm still open -- a merge_group run can finish after its
-              # PR was already merged/closed (e.g. superseded by a later
-              # queue entry), and posting to a closed PR's thread is
-              # confusing, not useful.
-              if pr_state=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.state' 2>/dev/null) && [[ "${pr_state}" == "open" ]]; then
-                echo "found=true" >> "${GITHUB_OUTPUT}"
-                echo "number=${pr_number}" >> "${GITHUB_OUTPUT}"
-              else
-                echo "Parsed PR #${pr_number} from merge_group branch '${HEAD_BRANCH}' but it's not open (state: ${pr_state:-unknown}); skipping."
-                echo "found=false" >> "${GITHUB_OUTPUT}"
-              fi
-            else
-              echo "merge_group head_branch '${HEAD_BRANCH}' doesn't match the expected gh-readonly-queue/.../pr-N-... pattern; skipping."
-              echo "found=false" >> "${GITHUB_OUTPUT}"
-            fi
-            exit 0
-          fi
-
-          # commits/{sha}/pulls is empty for unmerged fork SHAs (same gap
-          # e2e-on-approval-fork.yml works around). List open PRs targeting
-          # main and match head.sha; require a unique match rather than
-          # trusting github.event.workflow_run.pull_requests[], which is
-          # unreliable/empty for genuine cross-fork PRs.
-          if ! prs_json=$(gh api --paginate \
-            "repos/${REPO}/pulls?state=open&base=main&per_page=100" \
-            --jq '.[]' | jq -s '.'); then
-            echo "Failed to list open PRs for ${HEAD_SHA:0:7}; skipping."
-            echo "found=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-          pr_json=$(jq -c --arg sha "${HEAD_SHA}" '
-            [.[] | select(.state == "open") | select(.head.sha == $sha)]
-            | if length == 1 then .[0] else empty end
-          ' <<<"${prs_json}")
-          if [[ -z "${pr_json}" || "${pr_json}" == "null" ]]; then
-            echo "No unique open PR at ${HEAD_SHA:0:7}; skipping (stale head, or not a PR run)."
-            echo "found=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-          echo "found=true" >> "${GITHUB_OUTPUT}"
-          echo "number=$(jq -r '.number' <<<"${pr_json}")" >> "${GITHUB_OUTPUT}"
+        uses: ./.github/actions/resolve-pr-from-head-sha
+        with:
+          repo: ${{ github.repository }}
+          head-sha: ${{ github.event.workflow_run.head_sha }}
+          event-name: ${{ github.event.workflow_run.event }}
+          head-branch: ${{ github.event.workflow_run.head_branch }}
+          github-token: ${{ github.token }}
 
       # OSAC-3370's cheap e2e-readiness gate (lgtm / `/e2e-ready` /
       # CodeRabbit approval) can fail the whole caller workflow before the
@@ -263,7 +236,17 @@ jobs:
       github.event.workflow_run.conclusion == 'failure' &&
       needs.resolve.outputs.has-test-evidence == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Sized for the worst case across BOTH retry tiers: the primary model
+    # exhausting MAX_RETRIES (7 retries + 1 initial = 8 attempts, backoff
+    # summing to a few minutes) followed by the fallback model exhausting
+    # FALLBACK_MAX_RETRIES too (3 + 1 = 4 more attempts) -- see
+    # ai-diagnose-failure.py's own MAX_RETRIES/FALLBACK_MAX_RETRIES
+    # comments. Raised from 10 when the fallback tier was added; a
+    # diagnosis run that needs every attempt on both models is rare by
+    # construction (each tier existing specifically to make total failure
+    # rare), so this headroom is there for that rare case, not the
+    # typical one.
+    timeout-minutes: 20
     permissions:
       contents: read       # checkout this repo's own default-branch composite action + script only
       actions: read        # list/download the failed run's artifacts
@@ -277,11 +260,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          # Pinned explicitly (not github.repository's default) so this
-          # always checks out the scripts/action here, regardless of
-          # whether this run is native (workflow_run) or invoked
-          # cross-repo via workflow_call from another repo's wrapper.
-          repository: osac-project/osac-test-infra
+          # job.workflow_repository/job.workflow_sha -- see the resolve
+          # job's own copy of this step for the full reasoning (pins to
+          # the exact commit this running reusable workflow was actually
+          # invoked from, for both native and cross-repo workflow_call
+          # invocation, rather than whatever's on the default branch by
+          # the time this step runs).
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           persist-credentials: false
 
       # Scoped to Issues (known-issues fetch, PR comments, recurring-
@@ -564,12 +550,50 @@ jobs:
           FAILED_STEP_NAME: ${{ steps.job-log.outputs.step-name }}
           GOOGLE_CLOUD_PROJECT: ${{ steps.vertex-auth.outputs.gcp-project }}
           GOOGLE_CLOUD_LOCATION: ${{ steps.vertex-auth.outputs.gcp-location }}
-          # `inputs.gemini-model` only exists when this workflow was invoked
-          # via workflow_call (e.g. osac's wrapper) -- empty on a native
-          # workflow_run trigger in this repo, hence the fallback, which
-          # must match the workflow_call input's own `default:` above and
-          # ai-diagnose-failure.py's own GEMINI_MODEL fallback.
-          GEMINI_MODEL: ${{ inputs.gemini-model || 'gemini-2.5-pro' }}
+          # `inputs.gemini-model`/`inputs.gemini-fallback-model` only exist
+          # when this workflow was invoked via workflow_call (e.g. osac's
+          # wrapper) -- falsy on a native workflow_run trigger in this
+          # repo (GitHub Actions doesn't clearly document whether that's
+          # literally null or an empty string here, and this file's own
+          # invocation shares github.event_name == 'workflow_run' either
+          # way -- see below -- so this doesn't rely on knowing which),
+          # hence the fallback, which must match the workflow_call input's
+          # own `default:` above and ai-diagnose-failure.py's own
+          # GEMINI_MODEL default.
+          GEMINI_MODEL: ${{ inputs.gemini-model || 'gemini-3.1-pro-preview' }}
+          # NOT `inputs.gemini-fallback-model || 'gemini-3.7-flash'`: `||`
+          # treats an explicit empty string (the documented way to disable
+          # the fallback tier) as falsy too, so that pattern would silently
+          # override a caller's deliberate "" back to the default,
+          # defeating the whole point of offering it.
+          #
+          # Can't discriminate "native trigger" from "workflow_call caller
+          # explicitly passed \"\"" with github.event_name either: a
+          # workflow_call invocation of this file (osac's wrapper) reflects
+          # the CALLER's own original triggering event in every context,
+          # including github.event_name -- and the caller's own trigger is
+          # ALSO workflow_run (see this file's header comment), so
+          # github.event_name == 'workflow_run' is true in BOTH cases and
+          # can't tell them apart.
+          #
+          # Instead, use inputs.gemini-model's own truthiness as the
+          # discriminator: it's always a real, non-empty string whenever
+          # this run went through workflow_call at all (either the
+          # caller's explicit value, or -- if omitted -- its own `default:`
+          # above, which workflow_call populates automatically), and falsy
+          # on a native trigger, same as gemini-fallback-model itself. That
+          # makes `!inputs.gemini-model` true ONLY on a native trigger,
+          # short-circuiting the whole expression to the hardcoded default
+          # via `||` before ever touching inputs.gemini-fallback-model --
+          # and when it's false (genuinely came through workflow_call),
+          # `false || inputs.gemini-fallback-model` reliably yields
+          # inputs.gemini-fallback-model exactly as given, INCLUDING an
+          # explicit "", because `false || x` always returns x regardless
+          # of x's own truthiness (unlike `x || y`, which is what broke
+          # the plain `||`-only version above). Fragile only if
+          # gemini-model ever grows its own "empty means something"
+          # semantics -- it doesn't, and isn't expected to.
+          GEMINI_FALLBACK_MODEL: ${{ !inputs.gemini-model && 'gemini-3.7-flash' || inputs.gemini-fallback-model }}
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           DIAGNOSIS_FILE: ${{ runner.temp }}/diagnosis.md
@@ -820,17 +844,37 @@ jobs:
           DIAGNOSIS_FILE: ${{ runner.temp }}/diagnosis.md
         run: python3 .github/scripts/track-recurring-failure.py
 
-  # Separate, minimal job for the "now passing" comment edit: needs neither
-  # actions:read (no artifact to download) nor id-token:write (no diagnosis
-  # to run) -- see the top-level comment on `jobs:` for why this isn't just
-  # a branch inside the diagnose job above.
+  # Separate, minimal job for the "now passing"/"never ran" comment edit:
+  # needs neither actions:read (no artifact to download) nor id-token:write
+  # (no diagnosis to run) -- see the top-level comment on `jobs:` for why
+  # this isn't just a branch inside the diagnose job above.
+  #
+  # Two distinct cases share this job because they share every mechanic
+  # (find the sticky comment, replace one section, re-post) and differ
+  # only in what that section says:
+  #   - conclusion == success && has-test-evidence == true: the suite that
+  #     previously failed is passing again ("✅ ... Passing").
+  #   - has-test-evidence == false (regardless of conclusion): the suite
+  #     never actually ran -- e.g. the e2e-readiness gate (lgtm/e2e-ready/
+  #     CodeRabbit approval) wasn't met before it could start. Needed
+  #     because e2e-reserve-comment-on-start.yml posts a "⏳ Running"
+  #     placeholder as soon as the suite is REQUESTED, before anyone knows
+  #     whether e2e-readiness will even let it start -- without this
+  #     branch, that placeholder would sit there claiming "Running"
+  #     forever once the run in fact never reaches the real full-install
+  #     job (diagnose's own `if:` above already skips it for exactly this
+  #     reason, on the failure side; this covers both the success side
+  #     -- e.g. a doc-only PR where `changes` decides should-run: false --
+  #     and the failure side -- e2e-readiness itself failing).
   comment-success:
     name: Mark Resolved
     needs: resolve
     if: >-
       needs.resolve.outputs.found == 'true' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      needs.resolve.outputs.has-test-evidence == 'true'
+      (
+        (github.event.workflow_run.conclusion == 'success' && needs.resolve.outputs.has-test-evidence == 'true') ||
+        needs.resolve.outputs.has-test-evidence == 'false'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -839,11 +883,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          # Pinned explicitly (not github.repository's default) so this
-          # always checks out the scripts/action here, regardless of
-          # whether this run is native (workflow_run) or invoked
-          # cross-repo via workflow_call from another repo's wrapper.
-          repository: osac-project/osac-test-infra
+          # job.workflow_repository/job.workflow_sha -- see the resolve
+          # job's own copy of this step for the full reasoning.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           persist-credentials: false
 
       # Narrower than the diagnose job's own copy of this step: this job
@@ -895,24 +938,43 @@ jobs:
           fi
           echo "body-file=${BODY_FILE}" >> "${GITHUB_OUTPUT}"
 
-      # Nothing to update if there was never a failure comment -- never
-      # create one just to say things are fine.
+      # Nothing to update if there was never a comment (failure OR the new
+      # "⏳ Running" reservation) -- never create one just to say things
+      # are fine, or that a suite that never even got a placeholder was
+      # "skipped".
       - name: Prepare comment section
         id: section
         if: steps.comment.outputs.id != ''
         env:
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          HAS_TEST_EVIDENCE: ${{ needs.resolve.outputs.has-test-evidence }}
         run: |
           set -euo pipefail
           SECTION_FILE="${RUNNER_TEMP}/comment-section.md"
           # Plain bold header -- see the diagnose job's own "Prepare
           # comment section" step for why this isn't <sub>-wrapped.
-          {
-            echo "**✅ ${WORKFLOW_NAME} -- Passing**"
-            echo
-            echo "Previously failing; now passing as of [this run](${RUN_URL})."
-          } > "${SECTION_FILE}"
+          if [[ "${HAS_TEST_EVIDENCE}" == "true" ]]; then
+            {
+              echo "**✅ ${WORKFLOW_NAME} -- Passing**"
+              echo
+              echo "Previously failing; now passing as of [this run](${RUN_URL})."
+            } > "${SECTION_FILE}"
+          else
+            {
+              echo "**ℹ️ ${WORKFLOW_NAME} -- Skipped**"
+              echo
+              # Deliberately doesn't assert a specific cause: has-test-
+              # evidence == false covers at least two different reasons --
+              # the e2e-readiness gate (lgtm/e2e-ready/CodeRabbit approval)
+              # not being met, OR the suite simply wasn't needed (e.g. the
+              # \`changes\` job's own should-run: false for a doc-only PR)
+              # -- and this step has no cheap way to tell which one
+              # actually happened. Naming "readiness checks" specifically
+              # would be flatly wrong for the doc-only case.
+              echo "This suite never reached the point of actually running -- see the [run](${RUN_URL}) for why (e.g. the e2e-readiness gate wasn't met, or this suite wasn't needed for what changed)."
+            } > "${SECTION_FILE}"
+          fi
           echo "section-file=${SECTION_FILE}" >> "${GITHUB_OUTPUT}"
 
       - name: Build updated comment body

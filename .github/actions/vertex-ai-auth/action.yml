@@ -26,7 +26,16 @@ inputs:
   gcp-location:
     description: "Vertex AI region"
     required: false
-    default: "us-central1"
+    # "global", not a specific region: confirmed live against the osac-ci
+    # project (September 2026) that the current default diagnosis model
+    # (gemini-3.1-pro-preview) and its fallback (gemini-3.7-flash) only
+    # resolve on the global endpoint there -- us-central1 and every other
+    # region tried (us-east5, us-east1, us-west1, europe-west4,
+    # asia-southeast1) 404 for both. gemini-2.5-pro/gemini-2.5-flash (the
+    # previous default, kept in ai-diagnose-failure.py's pricing table in
+    # case they're selected again) work on both us-central1 and global, so
+    # this change doesn't break falling back to them.
+    default: "global"
 
 outputs:
   gcp-project:
