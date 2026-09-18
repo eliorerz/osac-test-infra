@@ -5,15 +5,22 @@ marker across a copy of the scanned logs.
 Usage: redact.py <gitleaks-findings.json> <dir-to-redact-in-place>
 
 gitleaks --max-decode-depth (default 5 in v8.30) reports *decoded*
-Secret/Match values (Tags: decoded:base64). The file often only has
-that secret inside a base64 blob (SQL DEBUG JSON, etc.), so exact
-Secret string replace no-ops and the uploaded tree still re-triggers
-gitleaks. Columns help but do not reliably mark the real blob.
+Secret/Match values (Tags: decoded:base64 / hex / percent). The file
+often only has that secret inside an encoded blob (SQL DEBUG JSON, AAP
+jobs-page extra_vars, etc.), so exact Secret string replace no-ops.
 
-All wipe targets (encoded fields, plaintext secrets, hex-encoded secrets,
-column spans) are computed against each file's pristine bytes, then
-applied in one pass so earlier replacements cannot shift later column
-offsets.
+decode-depth:1 columns bound the encoded segment in *file* bytes — use
+them only after the span peels to Secret. decode-depth>=2 columns bound
+a parent decode buffer, not the file; applying them nibbles JSON and
+leaves jwt-shaped fragments (CaaS jobs-page-1.json: 6→4→2 leftovers).
+
+Wipe strategy: quoted/assigned b64 fields, then any remaining b64/hex/
+percent *token* whose peel contains a finding Secret (outermost wrapper),
+then plaintext/hex(secret), compact JWTs when a jwt finding exists, then
+verified depth-1 columns only.
+
+All wipe targets are computed against each file's pristine bytes, then
+applied in one pass so earlier replacements cannot shift later offsets.
 """
 from __future__ import annotations
 
@@ -23,6 +30,7 @@ import json
 import pathlib
 import re
 import sys
+import urllib.parse
 from collections import defaultdict
 
 REDACTED_MARKER = b"[REDACTED]"
@@ -32,7 +40,9 @@ _MAX_DECODE_DEPTH = 5
 
 # gitleaks jwt Secret values sometimes include trailing backslashes copied
 # from JSON string escapes in the scanned line (CaaS run 30568135525).
-_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+_JWT_PATTERN = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+_JWT_RE = re.compile(_JWT_PATTERN)
+_JWT_RE_B = re.compile(_JWT_PATTERN.encode())
 
 # Match gitleaks default Base64 candidate floor ([\w/+-]{16,}={0,2}).
 # Longer floors (e.g. 40) miss 16-39-char quoted fields when resolve_path
@@ -51,6 +61,13 @@ _UNQUOTED_ASSIGNED_B64 = re.compile(
     + _B64_BODY
     + rb")(?![A-Za-z0-9+/_\-=])"
 )
+# Same alphabet as gitleaks, but not required to be a whole quoted field.
+# Finds wrappers embedded in mixed JSON strings (AAP jobs-page stdout).
+_B64_TOKEN = re.compile(_B64_BODY)
+# gitleaks hex: printable ASCII hex >= 32 characters.
+_HEX_TOKEN = re.compile(rb"[0-9A-Fa-f]{32,}")
+# gitleaks percent: consecutive %XX runs (8+ octets = 16 hex chars min).
+_PERCENT_RUN = re.compile(rb"(?:%[0-9A-Fa-f]{2}){8,}")
 
 
 def secret_variants(secret: str) -> list[str]:
@@ -105,18 +122,75 @@ def try_b64_decode(blob: bytes) -> bytes | None:
         return None
 
 
+def try_hex_decode(blob: bytes) -> bytes | None:
+    """Decode even-length hex >= 32 chars; None if not a hex blob."""
+    if len(blob) < 32 or len(blob) % 2:
+        return None
+    if any(byte not in b"0123456789abcdefABCDEF" for byte in blob):
+        return None
+    try:
+        return binascii.unhexlify(blob)
+    except binascii.Error:
+        return None
+
+
+def try_percent_decode(blob: bytes) -> bytes | None:
+    """Decode percent-encoding; None if blob has no % or does not change."""
+    if b"%" not in blob:
+        return None
+    try:
+        decoded = urllib.parse.unquote_to_bytes(blob.decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if decoded == blob:
+        return None
+    return decoded
+
+
+def decode_tag_meta(finding: dict) -> tuple[str | None, int]:
+    """Return (encoding, depth) from gitleaks Tags. Depth 0 if absent."""
+    kind: str | None = None
+    depth = 0
+    tags = finding.get("Tags") or []
+    if not isinstance(tags, list):
+        return None, 0
+    for tag in tags:
+        if not isinstance(tag, str):
+            continue
+        if tag.startswith("decoded:"):
+            rest = tag.split(":", 1)[1]
+            kind = rest or None
+        elif tag.startswith("decode-depth:"):
+            try:
+                depth = int(tag.split(":", 1)[1])
+            except ValueError:
+                depth = 0
+    return kind, depth
+
+
 def blob_decodes_to_secret(blob: bytes, secrets: list[bytes]) -> bool:
-    """True if any decode layer (up to _MAX_DECODE_DEPTH) contains a secret."""
-    current = blob
+    """True if any decode layer (up to _MAX_DECODE_DEPTH) contains a secret.
+
+    Try every decoder independently at each layer. Exclusive b64-then-hex
+    fallbacks miss cross-encodings such as base64(hex(secret)): b64 peels to
+    hex text, then urlsafe_b64decode accepts that alphabet and hex never runs.
+    """
+    frontier = [blob]
+    seen = {blob}
     for _ in range(_MAX_DECODE_DEPTH):
-        decoded = try_b64_decode(current)
-        if decoded is None:
+        next_frontier: list[bytes] = []
+        for current in frontier:
+            for decoder in (try_b64_decode, try_hex_decode, try_percent_decode):
+                decoded = decoder(current)
+                if decoded is None or decoded == current or decoded in seen:
+                    continue
+                if any(secret in decoded for secret in secrets):
+                    return True
+                seen.add(decoded)
+                next_frontier.append(decoded)
+        if not next_frontier:
             return False
-        if any(secret in decoded for secret in secrets):
-            return True
-        if decoded == current:
-            return False
-        current = decoded
+        frontier = next_frontier
     return False
 
 
@@ -189,6 +263,67 @@ def encoded_fields_containing_secrets(
     return ranges
 
 
+def embedded_b64_token_ranges(
+    content: bytes, secrets: list[bytes], skip: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """B64 tokens inside mixed strings, not only whole quoted fields.
+
+    AAP ``jobs-page-*.json`` is one minified line; stdout/extra_vars values
+    look like ``begin <b64> end`` so quoted-whole-field regexes miss them.
+    Skip spans already covered by quoted/assigned hits.
+    """
+    if not secrets:
+        return []
+    ranges: list[tuple[int, int]] = []
+    for match in _B64_TOKEN.finditer(content):
+        span = (match.start(), match.end())
+        if any(_ranges_overlap(span, seen) for seen in skip):
+            continue
+        if blob_decodes_to_secret(match.group(0), secrets):
+            ranges.append(span)
+    return ranges
+
+
+def embedded_hex_token_ranges(
+    content: bytes, secrets: list[bytes], skip: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """Hex tokens whose decode (or further peel) holds a secret."""
+    if not secrets:
+        return []
+    ranges: list[tuple[int, int]] = []
+    for match in _HEX_TOKEN.finditer(content):
+        span = (match.start(), match.end())
+        if any(_ranges_overlap(span, seen) for seen in skip):
+            continue
+        blob = match.group(0)
+        decoded = try_hex_decode(blob)
+        if decoded is None:
+            continue
+        if any(secret in decoded for secret in secrets) or blob_decodes_to_secret(
+            decoded, secrets
+        ):
+            ranges.append(span)
+    return ranges
+
+
+def percent_encoded_secret_ranges(
+    content: bytes, secrets: list[bytes]
+) -> list[tuple[int, int]]:
+    """Percent-encoded runs (gitleaks decoded:percent) that peel to a secret."""
+    if not secrets:
+        return []
+    ranges: list[tuple[int, int]] = []
+    for match in _PERCENT_RUN.finditer(content):
+        decoded = try_percent_decode(match.group(0))
+        if decoded is None:
+            continue
+        if any(secret in decoded for secret in secrets) or blob_decodes_to_secret(
+            decoded, secrets
+        ):
+            ranges.append((match.start(), match.end()))
+    return ranges
+
+
 def plaintext_secret_ranges(content: bytes, secrets: list[bytes]) -> list[tuple[int, int]]:
     """Half-open spans of cleartext Secret variants in content."""
     ranges: list[tuple[int, int]] = []
@@ -201,6 +336,24 @@ def plaintext_secret_ranges(content: bytes, secrets: list[bytes]) -> list[tuple[
             ranges.append((idx, idx + len(secret)))
             start = idx + len(secret)
     return ranges
+
+
+def findings_need_jwt_wipe(findings: list[dict], secrets: list[bytes]) -> bool:
+    """True when a jwt rule fired or a Secret variant is already compact-JWT."""
+    for finding in findings:
+        if str(finding.get("RuleID") or "").lower() == "jwt":
+            return True
+    return any(_JWT_RE_B.search(secret) for secret in secrets)
+
+
+def jwt_token_ranges(content: bytes) -> list[tuple[int, int]]:
+    """Half-open spans of compact JWTs in file bytes.
+
+    Decoded jwt findings often have Secret=payload JSON (or a parent-buffer
+    column span). The compact token stays in AAP extra_vars / kubeconfig YAML
+    and re-triggers gitleaks after column-nibble passes (CaaS run 34106916773).
+    """
+    return [(match.start(), match.end()) for match in _JWT_RE_B.finditer(content)]
 
 
 def hex_encoded_secret_ranges(content: bytes, secrets: list[bytes]) -> list[tuple[int, int]]:
@@ -313,6 +466,58 @@ def location_ranges(
     return ranges
 
 
+def _span_holds_secret(blob: bytes, secrets: list[bytes]) -> bool:
+    """True if blob contains Secret in plaintext or via an embedded peel."""
+    if any(secret in blob for secret in secrets):
+        return True
+    if blob_decodes_to_secret(blob, secrets):
+        return True
+    for match in _B64_TOKEN.finditer(blob):
+        if blob_decodes_to_secret(match.group(0), secrets):
+            return True
+    decoded = try_hex_decode(blob)
+    if decoded is not None and (
+        any(secret in decoded for secret in secrets)
+        or blob_decodes_to_secret(decoded, secrets)
+    ):
+        return True
+    decoded = try_percent_decode(blob)
+    if decoded is not None and (
+        any(secret in decoded for secret in secrets)
+        or blob_decodes_to_secret(decoded, secrets)
+    ):
+        return True
+    return False
+
+
+def verified_decoded_column_ranges(
+    content: bytes,
+    hits: list[tuple[int, int, int, list[bytes]]],
+) -> list[tuple[int, int]]:
+    """Depth-1 decoded column spans, only when file bytes peel to Secret."""
+    if not hits:
+        return []
+    offsets = line_start_offsets(content)
+    lines = content.split(b"\n")
+    if content.endswith(b"\n") and lines and lines[-1] == b"":
+        lines = lines[:-1]
+
+    ranges: list[tuple[int, int]] = []
+    for line_no, start_col, end_col, secrets in hits:
+        if line_no < 1 or line_no > len(lines) or not secrets:
+            continue
+        line = lines[line_no - 1]
+        span = column_span(line, start_col, end_col)
+        if span is None:
+            continue
+        blob = line[span[0] : span[1]]
+        if not _span_holds_secret(blob, secrets):
+            continue
+        base = offsets[line_no - 1]
+        ranges.append((base + span[0], base + span[1]))
+    return ranges
+
+
 def redact_tree(findings: list[dict], redacted_dir: pathlib.Path) -> None:
     """Wipe secrets under redacted_dir using pristine-byte ranges per file."""
     secrets = collect_secrets(findings)
@@ -320,6 +525,10 @@ def redact_tree(findings: list[dict], redacted_dir: pathlib.Path) -> None:
     # file -> line_number -> [(start_col, end_col), ...]
     pending_cols: dict[pathlib.Path, dict[int, list[tuple[int, int]]]] = defaultdict(
         lambda: defaultdict(list)
+    )
+    # decode-depth:1 only; verified against file bytes before wipe.
+    pending_decoded_depth1: dict[pathlib.Path, list[tuple[int, int, int, list[bytes]]]] = (
+        defaultdict(list)
     )
     for finding in findings:
         path = resolve_path(redacted_dir, finding.get("File") or "")
@@ -333,6 +542,18 @@ def redact_tree(findings: list[dict], redacted_dir: pathlib.Path) -> None:
             continue
         if end_line != start_line:
             continue
+        kind, depth = decode_tag_meta(finding)
+        if kind:
+            # decode-depth>=2 (or missing depth) columns are not file bytes.
+            if depth == 1:
+                finding_secrets = [
+                    variant.encode()
+                    for variant in secret_variants(finding.get("Secret") or "")
+                ]
+                pending_decoded_depth1[path].append(
+                    (int(start_line), int(start_col), int(end_col), finding_secrets)
+                )
+            continue
         pending_cols[path][int(start_line)].append((int(start_col), int(end_col)))
 
     # Every file under the tree may hold plaintext/encoded secrets even when
@@ -343,6 +564,7 @@ def redact_tree(findings: list[dict], redacted_dir: pathlib.Path) -> None:
         if p.is_file() and path_inside(redacted_dir, p)
     }
     paths.update(p for p in pending_cols if path_inside(redacted_dir, p))
+    paths.update(p for p in pending_decoded_depth1 if path_inside(redacted_dir, p))
 
     for path in sorted(paths):
         if not path_inside(redacted_dir, path):
@@ -355,10 +577,23 @@ def redact_tree(findings: list[dict], redacted_dir: pathlib.Path) -> None:
 
         ranges: list[tuple[int, int]] = []
         if secrets:
-            ranges.extend(encoded_fields_containing_secrets(content, secrets))
+            quoted = encoded_fields_containing_secrets(content, secrets)
+            ranges.extend(quoted)
+            embedded = embedded_b64_token_ranges(content, secrets, skip=quoted)
+            ranges.extend(embedded)
+            covered = quoted + embedded
+            ranges.extend(embedded_hex_token_ranges(content, secrets, skip=covered))
+            ranges.extend(percent_encoded_secret_ranges(content, secrets))
             ranges.extend(plaintext_secret_ranges(content, secrets))
             ranges.extend(hex_encoded_secret_ranges(content, secrets))
+        if findings_need_jwt_wipe(findings, secrets):
+            ranges.extend(jwt_token_ranges(content))
         ranges.extend(location_ranges(content, pending_cols.get(path, {})))
+        ranges.extend(
+            verified_decoded_column_ranges(
+                content, pending_decoded_depth1.get(path, [])
+            )
+        )
         if not ranges:
             continue
         path.write_bytes(apply_ranges(content, ranges))
