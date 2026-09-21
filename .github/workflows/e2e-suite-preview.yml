@@ -50,8 +50,15 @@ jobs:
           # Pinned explicitly, same reasoning as jobs-selection-report.yml's
           # own checkout: github.repository resolves to the CALLER (osac)
           # in a workflow_call context, but the script/action this job
-          # needs live here (osac-test-infra).
+          # needs live here (osac-test-infra). ref: job.workflow_sha pins
+          # to the exact commit of THIS reusable workflow file currently
+          # executing -- same pattern e2e-on-label.yml already uses --
+          # rather than whatever osac-test-infra's default branch tip
+          # happens to be by the time this step runs, which can have
+          # advanced past whatever `@main` resolved to when this workflow
+          # was invoked.
           repository: osac-project/osac-test-infra
+          ref: ${{ job.workflow_sha }}
           persist-credentials: false
           sparse-checkout: |
             .github/scripts/select-jobs.py
@@ -119,8 +126,20 @@ jobs:
       # against; a bug that somehow did make it exit non-zero should fail
       # loudly in this dead-end job's own logs rather than being masked,
       # since (per this file's header) it can never affect a merge either way.
+      #
+      # Always runs, even when steps.pr.outputs.number is empty: skipping
+      # this step outright left NO job summary at all for that case (just
+      # an easy-to-miss ::warning:: on the earlier "Resolve PR number"
+      # step), instead of the clean "preview unavailable" every other
+      # failure mode gets. Safe unconditionally -- GitHub Actions exports
+      # env: values even from a skipped step's outputs (as an empty
+      # string, not unset), so PR_DIFF_AVAILABLE below correctly becomes
+      # "" (falsy) when "Fetch PR diff" didn't run, and
+      # run_merge_queue_preview()'s own `if not PR_DIFF_AVAILABLE:`
+      # branch already renders that "preview unavailable" cleanly before
+      # ever touching GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION (also
+      # empty in that case).
       - name: Run E2E suite AI preview
-        if: steps.pr.outputs.number != ''
         env:
           MODE: merge-queue-preview
           PR_DIFF: ${{ steps.pr-diff.outputs.diff }}
