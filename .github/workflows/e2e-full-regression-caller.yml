@@ -7,9 +7,9 @@ name: E2E Full Regression
 
 on:
   schedule:
-    # Daily 02:00 UTC — offset from the per-suite crons that fire on :00
-    # of every 3h/4h/12h (those stay unchanged).
-    - cron: "0 2 * * *"
+    # Every other day (odd days of the month) at 02:00 UTC — offset from the
+    # per-suite crons that fire on :00 of every 6h/8h/24h.
+    - cron: "0 2 1-31/2 * *"
   workflow_dispatch:
     inputs:
       test-filter:

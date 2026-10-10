@@ -11,7 +11,7 @@ on:
     types: [labeled]
     branches: [main]
   schedule:
-    - cron: "0 */12 * * *"
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       pr-number:
