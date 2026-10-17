@@ -11,6 +11,7 @@ name: E2E for pull requests
 # The decision cancels the E2E of older commits by reading run titles: keep this exact format.
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch' && format('E2E #{0} (started by hand)', inputs.number) ||
+  github.event_name == 'issue_comment' && format('E2E #{0} (suites checked in the comment)', github.event.issue.number) ||
   format('E2E {0}:{1} @ {2}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch,
   github.event.workflow_run.head_sha) }}
 
@@ -18,6 +19,8 @@ on:  # zizmor: ignore[dangerous-triggers] -- no pull request code is checked out
   workflow_run:
     workflows: ["CI", "E2E review relay"]
     types: [requested, completed]
+  issue_comment:
+    types: [edited]  # the checkboxes of the comment that starts suites by hand (an edit of any other comment is skipped)
   workflow_dispatch:
     inputs:
       number:
@@ -28,7 +31,7 @@ permissions: {}
 
 jobs:
   decide:
-    uses: osac-project/osac-ci/.github/workflows/e2e-pr-decide.yml@c9463f6a0f6e00459160434041d38d6b7e5ae5df  # v1.0.0
+    uses: osac-project/osac-ci/.github/workflows/e2e-pr-decide.yml@ec980b4ab20ad5882d661684dc1060512634e787  # v1.1.0
     permissions:
       contents: read
       pull-requests: read
@@ -40,7 +43,7 @@ jobs:
   track:
     needs: decide
     if: needs.decide.outputs.start == 'true'
-    uses: osac-project/osac-ci/.github/workflows/e2e-pr-track.yml@c9463f6a0f6e00459160434041d38d6b7e5ae5df  # v1.0.0
+    uses: osac-project/osac-ci/.github/workflows/e2e-pr-track.yml@ec980b4ab20ad5882d661684dc1060512634e787  # v1.1.0
     permissions:
       contents: read
     with:
@@ -122,13 +125,16 @@ jobs:
   finish:
     needs: [decide, track, vmaas, caas, bmaas]
     if: always() && needs.decide.outputs.start == 'true'
-    uses: osac-project/osac-ci/.github/workflows/e2e-pr-finish.yml@c9463f6a0f6e00459160434041d38d6b7e5ae5df  # v1.0.0
+    uses: osac-project/osac-ci/.github/workflows/e2e-pr-finish.yml@ec980b4ab20ad5882d661684dc1060512634e787  # v1.1.0
     permissions:
       contents: read
     with:
       sha: ${{ needs.decide.outputs.sha }}
       suites: ${{ needs.decide.outputs.suites }}
       suite-checks: ${{ needs.decide.outputs.suite-checks }}
+      number: ${{ needs.decide.outputs.number }}
+      manual: ${{ needs.decide.outputs.manual }}
+      selected-checks: ${{ needs.decide.outputs.selected-checks }}
       results: ${{ toJSON(needs) }}
     secrets:
       OSAC_CI_APP_PRIVATE_KEY: ${{ secrets.OSAC_CI_APP_PRIVATE_KEY }}
