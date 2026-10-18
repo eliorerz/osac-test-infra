@@ -166,9 +166,10 @@ jobs:
         with:
           # Default to the revision of this very workflow file, so a caller that pins the workflow by commit gets the
           # scripts and actions of the same commit; test-infra-repository/test-infra-ref still win (the pull request
-          # flow of this repository tests the pull request's own commit).
+          # flow of this repository tests the pull request's own commit). The workflow's commit is only used for this
+          # workflow's own repository: another repository without a ref gets its default branch, as before.
           repository: ${{ inputs.test-infra-repository || job.workflow_repository }}
-          ref: ${{ inputs.test-infra-ref || job.workflow_sha }}
+          ref: ${{ inputs.test-infra-ref || ((inputs.test-infra-repository == '' || inputs.test-infra-repository == job.workflow_repository) && job.workflow_sha || '') }}
           persist-credentials: false
 
       - name: Overlay tests from osac mono-repo

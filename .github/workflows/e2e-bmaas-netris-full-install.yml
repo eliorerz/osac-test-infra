@@ -114,7 +114,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ inputs.test-infra-repository || job.workflow_repository }}
-          ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || job.workflow_sha }}
+          ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || ((inputs.test-infra-repository == '' || inputs.test-infra-repository == job.workflow_repository) && job.workflow_sha || '') }}
           persist-credentials: false
 
       - name: Validate and bootstrap
@@ -195,7 +195,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ inputs.test-infra-repository || job.workflow_repository }}
-          ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || job.workflow_sha }}
+          ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || ((inputs.test-infra-repository == '' || inputs.test-infra-repository == job.workflow_repository) && job.workflow_sha || '') }}
           persist-credentials: false
 
       - name: Validate and bootstrap
@@ -310,7 +310,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ inputs.test-infra-repository || job.workflow_repository }}
-          ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || job.workflow_sha }}
+          ref: ${{ inputs.test-infra-sha || inputs.test-infra-ref || ((inputs.test-infra-repository == '' || inputs.test-infra-repository == job.workflow_repository) && job.workflow_sha || '') }}
           persist-credentials: false
 
       - name: Prepare Netris diagnostic log directory
