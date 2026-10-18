@@ -164,8 +164,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: ${{ inputs.test-infra-repository || github.repository }}
-          ref: ${{ inputs.test-infra-ref || '' }}
+          # Default to the revision of this very workflow file, so a caller that pins the workflow by commit gets the
+          # scripts and actions of the same commit; test-infra-repository/test-infra-ref still win (the pull request
+          # flow of this repository tests the pull request's own commit).
+          repository: ${{ inputs.test-infra-repository || job.workflow_repository }}
+          ref: ${{ inputs.test-infra-ref || job.workflow_sha }}
           persist-credentials: false
 
       - name: Overlay tests from osac mono-repo
