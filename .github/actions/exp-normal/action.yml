@@ -1,0 +1,15 @@
+---
+name: exp-normal
+description: inner always() && !cancelled() step plus fallback, like collect-artifacts
+runs:
+  using: composite
+  steps:
+    - name: inner-normal
+      id: collect
+      if: always() && !cancelled()
+      shell: bash
+      run: echo "inner-normal start $(date +%T)"; sleep 100; echo "inner-normal done $(date +%T)"
+    - name: inner-variant
+      if: cancelled() && (steps.collect.outcome == 'skipped' || steps.collect.outcome == 'cancelled')
+      shell: bash
+      run: echo "inner-variant ran $(date +%T)"; sleep 3

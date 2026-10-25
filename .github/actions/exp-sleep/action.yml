@@ -1,0 +1,13 @@
+---
+name: exp-sleep
+description: single inner step with the default condition
+inputs:
+  seconds:
+    required: false
+    default: "100"
+runs:
+  using: composite
+  steps:
+    - name: inner
+      shell: bash
+      run: echo "sleep ${{ inputs.seconds }} start $(date +%T)"; sleep ${{ inputs.seconds }}; echo "done $(date +%T)"
