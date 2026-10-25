@@ -27,14 +27,17 @@ jobs:
     kind: e2e
     check: "E2E / CaaS Full Install"
     suite: caas
+    workflow: e2e-pr-caas.yml  # a run of its own, started by the decision
     filters_any: [e2e-code]
   e2e-bmaas:
     kind: e2e
     check: "E2E / BMaaS Full Install"
     suite: bmaas
+    workflow: e2e-pr-bmaas.yml  # a run of its own, started by the decision
     filters_any: [e2e-code]
   e2e-netris:
     kind: e2e
     check: "E2E / BMaaS Netris Full Install"
     suite: netris
+    workflow: e2e-pr-netris.yml  # a run of its own, started by the decision
     manual_only: true
