@@ -874,7 +874,10 @@ jobs:
               --junitxml=/tmp/test-output/junit.xml -v
 
       - name: Gather artifacts
-        if: always()
+        # Not when the job was cancelled: a cancelled job has about five minutes for its always() steps before the runner
+        # is cut off, and gathering and scanning the logs can take longer than that, so the Teardown below never ran and
+        # the cluster clone stayed on the CI host (orphans seen after the merge queue stopped runs).
+        if: always() && !cancelled()
         uses: ./.github/actions/gather-artifacts
         with:
           namespace: ${{ inputs.namespace }}
