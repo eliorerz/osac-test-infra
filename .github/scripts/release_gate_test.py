@@ -566,6 +566,43 @@ def test_a_credential_never_ends_up_in_a_marker_label_or_the_report() -> None:
         _assert("(h-" in path.read_text(), "the label did not carry a hash in place of the credential")
 
 
+def test_a_secret_in_a_file_or_directory_name_is_not_published_or_reported() -> None:
+    import tempfile as _tempfile
+    for value in ("Zx9qL2mPa7vR4tY-ascii", "P\u00e4ssw\u00f6rd-0123456789abcdef"):
+        with Fixture() as fx:
+            fx.secret.write_text(json.dumps({"password": value}, ensure_ascii=False), encoding="utf-8")
+            fx.write(f"pod-{value}.log", "harmless content\n")
+            fx.write(f"dir-{value}/inner.log", "harmless too\n")
+            keep = fx.write("kept/normal.log", "unrelated\n")
+            summary = pathlib.Path(_tempfile.mkdtemp()) / "summary.md"
+            os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+            os.environ["GITHUB_ACTIONS"] = "true"
+            try:
+                code, out, err = fx.gate()
+            finally:
+                del os.environ["GITHUB_STEP_SUMMARY"], os.environ["GITHUB_ACTIONS"]
+            _assert(code == 0, f"run failed: {out}{err}")
+            published = [str(p.relative_to(fx.root)) for p in fx.root.rglob("*")]
+            _assert(not any(value in name for name in published), f"a name still carries the secret: {published}")
+            _assert(keep.exists(), "an unrelated file was removed")
+            # The files are kept under a safe name, not thrown away.
+            _assert(any(n.startswith("pod-(h-") and n.endswith(".log") for n in published), f"the file was not renamed: {published}")
+            _assert(any(n.startswith("dir-(h-") and n.endswith("inner.log") for n in published), f"the directory was not renamed: {published}")
+            seen = out + err + (fx.root / gate.REPORT_NAME).read_text(encoding="utf-8") + (summary.read_text(encoding="utf-8") if summary.exists() else "")
+            _assert(value not in seen and json.dumps(value) not in seen,
+                    f"the secret reached the output, the step summary or the report: {seen!r}")
+            report = json.loads((fx.root / gate.REPORT_NAME).read_text(encoding="utf-8"))
+            _assert(any(c["rule"] == "path:known-value" for c in report["censored"]), f"not reported: {report}")
+
+
+def test_check_mode_reports_a_secret_in_a_name_without_touching_it() -> None:
+    with Fixture() as fx:
+        path = fx.write(f"pod-{TOKEN}.log", "harmless\n")
+        code, out, err = fx.gate("--check")
+        _assert(code == 1 and path.exists(), "check mode must flag the name and leave the file")
+        _assert(TOKEN not in out + err, "check mode printed the secret from a file name")
+
+
 def main() -> None:
     test_incident_shape_is_censored_and_json_stays_valid()
     test_shape_rules_catch_it_without_any_known_value()
@@ -601,6 +638,8 @@ def main() -> None:
     test_url_credentials_are_inventoried_on_their_own()
     test_url_credentials_split_on_semicolons_and_decode_form_encoding()
     test_a_credential_never_ends_up_in_a_marker_label_or_the_report()
+    test_a_secret_in_a_file_or_directory_name_is_not_published_or_reported()
+    test_check_mode_reports_a_secret_in_a_name_without_touching_it()
     print("release_gate_test.py: ok")
 
 

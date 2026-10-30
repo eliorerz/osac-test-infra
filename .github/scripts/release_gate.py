@@ -530,15 +530,54 @@ def _entries(root: pathlib.Path) -> list[pathlib.Path]:
 def process_directory(root: pathlib.Path, inventory: dict[bytes, str], check: bool = False) -> Report:
     patterns = Patterns(inventory)
     report = Report()
+
+    def shown(relative_path: str) -> str:
+        """A path as the report and the output may show it: with any secret in it censored."""
+        raw = relative_path.encode("utf-8", "surrogateescape")
+        return censor_bytes(raw, patterns)[0].decode("utf-8", "surrogateescape")
+
+    def rename_target(relative_path: str) -> str | None:
+        """The path with every inventory value replaced by a short hash, or None if a value
+        still shows through (an encoded form) and the file has to go. Only characters that
+        upload-artifact accepts in a path: no brackets-and-colon marker."""
+        raw = relative_path.encode("utf-8", "surrogateescape")
+        for needle in sorted(inventory, key=len, reverse=True):
+            raw = raw.replace(needle, f"(h-{fingerprint(needle)})".encode())
+        return None if patterns.present(raw) else raw.decode("utf-8", "surrogateescape")
+
     for path in _entries(root):
         relative = str(path.relative_to(root))
+        name = shown(relative)
         if path.is_symlink():
-            report.withheld.append({"file": relative, "reason": "symbolic link"})
+            report.withheld.append({"file": name, "reason": "symbolic link"})
             if not check:
                 path.unlink()
             continue
         if not path.is_file():
             continue
+        if patterns.present(relative.encode("utf-8", "surrogateescape")):
+            # The name is published with the artifact, so a secret in it is a leak like any other.
+            target = rename_target(relative)
+            if check:
+                report.censored.append({"file": name, "rule": "path:known-value", "count": 1})
+            elif target is None:
+                report.withheld.append({"file": name, "reason": "path contains a known value"})
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
+            else:
+                new_path = root / target
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                counter = 1
+                while new_path.exists():
+                    new_path = root / f"{target}-dup{counter}"
+                    counter += 1
+                path.rename(new_path)
+                path, relative = new_path, str(new_path.relative_to(root))
+                name = shown(relative)
+                report.censored.append({"file": name, "rule": "path:known-value", "count": 1})
         try:
             if path.stat().st_size > MAX_FILE_BYTES:
                 raise ValueError("larger than the inspection limit")
@@ -552,7 +591,7 @@ def process_directory(root: pathlib.Path, inventory: dict[bytes, str], check: bo
                 _clean, hits = censor_bytes(payload, patterns)
                 if hits:
                     report.withheld.append(
-                        {"file": relative, "reason": "secret inside archive: " + ", ".join(sorted(hits))}
+                        {"file": name, "reason": "secret inside archive: " + ", ".join(sorted(hits))}
                     )
                     if not check:
                         path.unlink()
@@ -560,22 +599,31 @@ def process_directory(root: pathlib.Path, inventory: dict[bytes, str], check: bo
             cleaned, hits = censor_bytes(data, patterns)
             if hits:
                 for rule, count in sorted(hits.items()):
-                    report.censored.append({"file": relative, "rule": rule, "count": count})
+                    report.censored.append({"file": name, "rule": rule, "count": count})
                 if check:
                     continue
                 survivors = patterns.present(_MARKER.sub(b"", cleaned))
                 if survivors:
                     path.unlink()
                     report.withheld.append(
-                        {"file": relative, "reason": "known value survived censoring: " + ", ".join(survivors)}
+                        {"file": name, "reason": "known value survived censoring: " + ", ".join(survivors)}
                     )
                 else:
                     path.write_bytes(cleaned)
         except (OSError, ValueError, MemoryError) as exc:
-            report.withheld.append({"file": relative, "reason": f"{exc.__class__.__name__}: {exc}"})
+            report.withheld.append({"file": name, "reason": f"{exc.__class__.__name__}: {exc}"})
             if not check:
                 try:
                     path.unlink()
+                except OSError:
+                    pass
+    if not check:
+        # A directory named after a secret is published too, even when it is empty.
+        for directory, _subdirs, _files in os.walk(root, topdown=False, followlinks=False):
+            folder = pathlib.Path(directory)
+            if folder != root and patterns.present(str(folder.relative_to(root)).encode("utf-8", "surrogateescape")):
+                try:
+                    folder.rmdir()
                 except OSError:
                     pass
     return report
@@ -665,6 +713,13 @@ def main(argv: list[str]) -> int:
 
     report = process_directory(root, inventory, check=args.check)
     report.inventory = sources
+    # Validate before anything is printed, written to the step summary or saved. Names in the
+    # report are already censored; this is the check that they really are. No ASCII escaping, so
+    # a value with non-ASCII characters is compared as it appears in an artifact.
+    report_text = json.dumps(report.as_json(), indent=2, ensure_ascii=False) + "\n"
+    if Patterns(inventory).present(report_text.encode("utf-8", "surrogateescape")):
+        print("release gate failed: the report would contain a secret value", file=sys.stderr)
+        return 2
     in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
     for entry in report.censored:
         print(f"{'::warning::' if in_actions else ''}{entry['file']}: {entry['rule']} x{entry['count']}"
@@ -674,11 +729,6 @@ def main(argv: list[str]) -> int:
     _write_summary(report, args.check)
     if not args.check:
         report_path = pathlib.Path(args.report) if args.report else root / REPORT_NAME
-        report_text = json.dumps(report.as_json(), indent=2) + "\n"
-        encoded_report = report_text.encode("utf-8", "surrogateescape")
-        if any(needle in encoded_report for needle in inventory):
-            print("release gate failed: the report would contain a secret value", file=sys.stderr)
-            return 2
         report_path.write_text(report_text, encoding="utf-8")
     values = sum(int(s["values"]) for s in sources)
     print(f"Release gate: {len(report.censored)} censoring(s), {len(report.withheld)} file(s) withheld, "
