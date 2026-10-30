@@ -34,11 +34,19 @@ rc=0
 timeout "${COLLECT_TIMEOUT_SECONDS}" \
   "${GITHUB_WORKSPACE}/scripts/gather-osac-logs.sh" "${ARTIFACT_DIR}" || rc=$?
 
-# The release gate censors the values of the cluster's own Secrets wherever they
-# show up. The snapshot lives next to the artifact directory, never inside it,
-# and is readable by this user only.
+# The release gate censors the values of the secrets the job holds, wherever they
+# show up. Teardown deletes the files that hold them before the upload runs, so
+# keep a copy now. The snapshots live next to the artifact directory, never inside
+# it, readable by this user only, and the upload action deletes them after use.
 INVENTORY_DIR="${RUNNER_TEMP}/osac-secret-inventory"
-mkdir -p "${INVENTORY_DIR}"
+mkdir -p "${INVENTORY_DIR}/secret-files"
+chmod 700 "${INVENTORY_DIR}" "${INVENTORY_DIR}/secret-files"
+for secret_file in "${RUNNER_TEMP}/pull-secret.json" "${RUNNER_TEMP}/auth.json" \
+  "${RUNNER_TEMP}/containers-auth-base.json" "${RUNNER_TEMP}/chart-registry-auth.json"; do
+  if [[ -f "${secret_file}" ]]; then
+    (umask 077 && cp -- "${secret_file}" "${INVENTORY_DIR}/secret-files/$(basename "${secret_file}")") || true
+  fi
+done
 (umask 077 && timeout 60 oc get secrets -n "${E2E_NAMESPACE:-osac-e2e-ci}" -o json \
   > "${INVENTORY_DIR}/k8s-secrets.json" 2>/dev/null) \
   || { rm -f "${INVENTORY_DIR}/k8s-secrets.json"; echo "::notice::Secret inventory not collected"; }

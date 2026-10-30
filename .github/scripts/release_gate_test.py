@@ -434,6 +434,21 @@ def test_zip_entries_with_unbounded_methods_are_refused() -> None:
             _assert((fx.root / f"{label}.zip").exists(), f"a harmless {label} zip must stay")
 
 
+def test_optional_secret_files_are_skipped_when_absent_or_empty() -> None:
+    """Snapshots of auth files the job may leave empty must not abort the upload."""
+    with Fixture() as fx:
+        path = fx.write("a.log", f"leak {TOKEN}\n")
+        empty = fx.root.parent / "auth.json"
+        empty.write_text(json.dumps({"auths": {}}))
+        code, out, _ = _run(fx.root, "--optional-secret-file", str(empty),
+                            "--optional-secret-file", str(fx.root.parent / "absent.json"),
+                            "--optional-secret-file", str(fx.secret))
+        _assert(code == 0, f"an empty or missing optional file must be skipped, got {code}: {out}")
+        _assert(TOKEN not in path.read_text(), "the non-empty optional file was not used")
+        code, _, _ = _run(fx.root, "--secret-file", str(empty))
+        _assert(code == 2, "a named --secret-file with no value must still fail closed")
+
+
 def main() -> None:
     test_incident_shape_is_censored_and_json_stays_valid()
     test_shape_rules_catch_it_without_any_known_value()
@@ -460,6 +475,7 @@ def main() -> None:
     test_a_secret_file_that_is_not_utf8_is_an_error()
     test_decompression_bombs_are_abandoned_at_the_limit()
     test_zip_entries_with_unbounded_methods_are_refused()
+    test_optional_secret_files_are_skipped_when_absent_or_empty()
     print("release_gate_test.py: ok")
 
 

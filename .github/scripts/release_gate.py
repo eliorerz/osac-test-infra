@@ -514,21 +514,27 @@ def process_directory(root: pathlib.Path, inventory: dict[bytes, str], check: bo
 def build_inventory(args: argparse.Namespace) -> tuple[dict[bytes, str], list[dict[str, object]], int]:
     inventory: dict[bytes, str] = {}
     sources: list[dict[str, object]] = []
-    for name in args.secret_file:
-        path = pathlib.Path(name)
-        if not path.is_file():
-            print(f"{path}: not present, nothing to check against")
-            continue
-        try:
-            found = needles_from_secret_file(path)
-        except (OSError, UnicodeDecodeError) as exc:
-            print(f"{path}: unreadable ({exc.__class__.__name__})", file=sys.stderr)
-            return {}, sources, 2
-        if not found:
-            print(f"{path}: no value of {MIN_LEN}+ characters to check against", file=sys.stderr)
-            return {}, sources, 2
-        inventory.update(found)
-        sources.append({"source": path.name, "values": len(found)})
+    for optional, names in ((False, args.secret_file), (True, args.optional_secret_file)):
+        for name in names:
+            path = pathlib.Path(name)
+            if not path.is_file():
+                print(f"{path}: not present, nothing to check against")
+                continue
+            try:
+                found = needles_from_secret_file(path)
+            except (OSError, UnicodeDecodeError) as exc:
+                print(f"{path}: unreadable ({exc.__class__.__name__})", file=sys.stderr)
+                return {}, sources, 2
+            if not found:
+                # A named secret file with nothing in it is an error. A snapshot of a file
+                # the job may legitimately have left empty is only skipped.
+                print(f"{path}: no value of {MIN_LEN}+ characters to check against",
+                      file=sys.stdout if optional else sys.stderr)
+                if optional:
+                    continue
+                return {}, sources, 2
+            inventory.update(found)
+            sources.append({"source": path.name, "values": len(found)})
     for name in args.env:
         value = os.environ.get(name, "")
         if len(value) >= MIN_LEN:
@@ -570,6 +576,8 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("directory")
     parser.add_argument("--secret-file", action="append", default=[])
+    parser.add_argument("--optional-secret-file", action="append", default=[],
+                        help="like --secret-file, but a file that is missing or holds no value is skipped")
     parser.add_argument("--env", action="append", default=[], help="environment variable holding a secret")
     parser.add_argument("--k8s-secrets", action="append", default=[], help="`oc get secrets -o json` output")
     parser.add_argument("--report", help=f"report path (default: <directory>/{REPORT_NAME})")
