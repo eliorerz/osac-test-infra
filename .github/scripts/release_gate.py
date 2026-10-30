@@ -52,6 +52,7 @@ import pathlib
 import re
 import sys
 import tarfile
+import urllib.parse
 import zipfile
 
 # Shorter strings (usernames, hostnames, placeholders) would flag ordinary text.
@@ -75,11 +76,26 @@ _K8S_IDENTITY_KEYS = {
     "user", "username", "user-id", "userid", "client-id", "client_id", "clientid", "email",
     "host", "hostname", "url", "endpoint", "region",
 }
-# A password in a URL, or a token-like query parameter.
-_CREDENTIAL_IN_TEXT = re.compile(
-    r"://[^/\s:@]+:[^/\s@]+@|[?&;](?:token|password|passwd|pwd|secret|key|apikey|api_key|access_key|sig|signature|auth)=[^&\s]+",
-    re.I,
+# A password in the userinfo of a URL, or a token-like query parameter. Userinfo ends at the
+# first / ? or #, so a port followed by a query string is not mistaken for user:password.
+_URL_USERINFO = re.compile(r"://[^/\s:@?#]+:([^/\s@?#]+)@")
+_CREDENTIAL_QUERY = re.compile(
+    r"[?&;](?:token|password|passwd|pwd|secret|key|apikey|api_key|access_key|sig|signature|auth)=([^&\s#]+)", re.I
 )
+_MIN_URL_CREDENTIAL = 8
+
+
+def _credential_bearing(text: str) -> bool:
+    return bool(_URL_USERINFO.search(text) or _CREDENTIAL_QUERY.search(text))
+
+
+def _add_url_credentials(text: str, label: str, out: dict[bytes, str]) -> None:
+    """The password and token values inside a URL, so a log that prints only one still matches."""
+    for regex in (_URL_USERINFO, _CREDENTIAL_QUERY):
+        for match in regex.finditer(text):
+            for value in {match.group(1), urllib.parse.unquote(match.group(1))}:
+                if len(value) >= _MIN_URL_CREDENTIAL:
+                    out.setdefault(value.encode("utf-8", "surrogateescape"), f"{label}(url credential)")
 
 _B64_CHARS = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/-_"
@@ -120,6 +136,7 @@ def _add_string(text: str, label: str, out: dict[bytes, str], depth: int, min_le
     if len(text) < min_len:
         return
     out.setdefault(text.encode("utf-8", "surrogateescape"), label)
+    _add_url_credentials(text, label, out)
     if depth >= _MAX_NESTING:
         return
     try:
@@ -172,7 +189,7 @@ def needles_from_k8s_secrets(path: pathlib.Path) -> dict[bytes, str]:
         for key, text in values.items():
             if key.lower() in _K8S_PUBLIC_KEYS or text.startswith("-----BEGIN CERTIFICATE-----"):
                 continue
-            if key.lower() in _K8S_IDENTITY_KEYS and not _CREDENTIAL_IN_TEXT.search(text):
+            if key.lower() in _K8S_IDENTITY_KEYS and not _credential_bearing(text):
                 continue
             label = f"{prefix}/{key}"
             if text.lstrip().startswith(("{", "[")):

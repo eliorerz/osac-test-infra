@@ -510,6 +510,32 @@ def test_credential_bearing_urls_in_cluster_secrets_are_censored() -> None:
         _assert("https://storage.example.com/bucket" in text, "a plain public endpoint must stay")
 
 
+def test_a_port_followed_by_a_query_is_not_a_password() -> None:
+    with Fixture() as fx:
+        listing = fx.root.parent / "secrets.json"
+        listing.write_text(json.dumps({"items": [{"metadata": {"namespace": "ns", "name": "api"}, "data": {
+            "endpoint": base64.b64encode(b"https://api.example:443?user=a@b").decode()}}]}))
+        path = fx.write("a.log", "calling https://api.example:443?user=a@b now\n")
+        before = path.read_bytes()
+        _run(fx.root, "--k8s-secrets", str(listing))
+        _assert(path.read_bytes() == before, "a public endpoint was mistaken for a credential-bearing url")
+
+
+def test_url_credentials_are_inventoried_on_their_own() -> None:
+    with Fixture() as fx:
+        encode = lambda text: base64.b64encode(text.encode()).decode()
+        listing = fx.root.parent / "secrets.json"
+        listing.write_text(json.dumps({"items": [{"metadata": {"namespace": "ns", "name": "db"}, "data": {
+            "url": encode("postgres://svc:Zx9qL2mPa7vR4tY@db.example:5432/app"),
+            "dsn": encode("postgres://svc:p%40ss%2Fw0rd-Qm4x@db.example/app"),
+            "webhook": encode("https://hooks.example.com/notify?token=Tq8wE5rY2uI9oP1a&x=1")}}]}))
+        path = fx.write("a.log", "password Zx9qL2mPa7vR4tY alone\nlogin p@ss/w0rd-Qm4x alone\ntoken Tq8wE5rY2uI9oP1a alone\n")
+        _run(fx.root, "--k8s-secrets", str(listing))
+        text = path.read_text()
+        for leaked in ("Zx9qL2mPa7vR4tY", "p@ss/w0rd-Qm4x", "Tq8wE5rY2uI9oP1a"):
+            _assert(leaked not in text, f"{leaked[:6]}... was printed on its own and survived: {text!r}")
+
+
 def main() -> None:
     test_incident_shape_is_censored_and_json_stays_valid()
     test_shape_rules_catch_it_without_any_known_value()
@@ -541,6 +567,8 @@ def main() -> None:
     test_identity_keys_of_cluster_secrets_are_left_alone()
     test_text_shaped_like_a_marker_does_not_hide_a_secret()
     test_credential_bearing_urls_in_cluster_secrets_are_censored()
+    test_a_port_followed_by_a_query_is_not_a_password()
+    test_url_credentials_are_inventoried_on_their_own()
     print("release_gate_test.py: ok")
 
 
