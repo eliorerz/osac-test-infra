@@ -479,6 +479,37 @@ def test_identity_keys_of_cluster_secrets_are_left_alone() -> None:
         _assert("Zx9!qL2mPa7vR4tY" not in text, "the password was not censored")
 
 
+def test_text_shaped_like_a_marker_does_not_hide_a_secret() -> None:
+    with Fixture() as fx:
+        spoof = fx.write("spoof.log", f"before [REDACTED:note {TOKEN} ] after\nplain {TOKEN}\n")
+        benign = fx.write("benign.log", "report said [REDACTED:something] and nothing else\n")
+        before = benign.read_bytes()
+        code, _, _ = fx.gate()
+        _assert(code == 0 and spoof.exists(), "the file with a lookalike marker was withheld or the run failed")
+        text = spoof.read_text()
+        _assert(TOKEN not in text, f"a marker-shaped string hid the token: {text!r}")
+        _assert(text.count("[REDACTED:password") + text.count("[REDACTED:") >= 1, "the token was not replaced by a marker")
+        _assert(benign.read_bytes() == before, "a file with a lookalike but no secret must stay byte-identical")
+
+
+def test_credential_bearing_urls_in_cluster_secrets_are_censored() -> None:
+    with Fixture() as fx:
+        encode = lambda text: base64.b64encode(text.encode()).decode()
+        listing = fx.root.parent / "secrets.json"
+        listing.write_text(json.dumps({"items": [{"metadata": {"namespace": "ns", "name": "db"}, "data": {
+            "url": encode("postgres://svc:Zx9qL2mPa7vR4tY@db.example:5432/app"),
+            "endpoint": encode("https://storage.example.com/bucket"),
+            "webhook": encode("https://hooks.example.com/notify?token=Tq8wE5rY2uI9oP1a")}}]}))
+        path = fx.write("a.log", "db postgres://svc:Zx9qL2mPa7vR4tY@db.example:5432/app\n"
+                                  "storage https://storage.example.com/bucket\n"
+                                  "hook https://hooks.example.com/notify?token=Tq8wE5rY2uI9oP1a\n")
+        _run(fx.root, "--k8s-secrets", str(listing))
+        text = path.read_text()
+        _assert("Zx9qL2mPa7vR4tY" not in text, "a password inside a url survived")
+        _assert("Tq8wE5rY2uI9oP1a" not in text, "a token in a query string survived")
+        _assert("https://storage.example.com/bucket" in text, "a plain public endpoint must stay")
+
+
 def main() -> None:
     test_incident_shape_is_censored_and_json_stays_valid()
     test_shape_rules_catch_it_without_any_known_value()
@@ -508,6 +539,8 @@ def main() -> None:
     test_optional_secret_files_are_skipped_when_absent_or_empty()
     test_a_value_inside_its_own_marker_label_is_censored_not_withheld()
     test_identity_keys_of_cluster_secrets_are_left_alone()
+    test_text_shaped_like_a_marker_does_not_hide_a_secret()
+    test_credential_bearing_urls_in_cluster_secrets_are_censored()
     print("release_gate_test.py: ok")
 
 

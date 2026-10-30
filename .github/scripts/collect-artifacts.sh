@@ -41,19 +41,26 @@ timeout "${COLLECT_TIMEOUT_SECONDS}" \
 INVENTORY_DIR="${RUNNER_TEMP}/osac-secret-inventory"
 mkdir -p "${INVENTORY_DIR}/secret-files"
 chmod 700 "${INVENTORY_DIR}" "${INVENTORY_DIR}/secret-files"
+snapshot_ok=1
 for secret_file in "${RUNNER_TEMP}/pull-secret.json" "${RUNNER_TEMP}/auth.json" \
   "${RUNNER_TEMP}/containers-auth-base.json" "${RUNNER_TEMP}/chart-registry-auth.json"; do
   if [[ -f "${secret_file}" ]]; then
-    (umask 077 && cp -- "${secret_file}" "${INVENTORY_DIR}/secret-files/$(basename "${secret_file}")") || true
+    # Teardown deletes the original, so a copy that failed means the gate would not know
+    # this secret. Do not mark the artifacts complete; the upload action then refuses them.
+    (umask 077 && cp -- "${secret_file}" "${INVENTORY_DIR}/secret-files/$(basename "${secret_file}")") \
+      || { snapshot_ok=0; echo "::error::Could not save a copy of $(basename "${secret_file}") for the release gate"; }
   fi
 done
 (umask 077 && timeout 60 oc get secrets -n "${E2E_NAMESPACE:-osac-e2e-ci}" -o json \
   > "${INVENTORY_DIR}/k8s-secrets.json" 2>/dev/null) \
   || { rm -f "${INVENTORY_DIR}/k8s-secrets.json"; echo "::notice::Secret inventory not collected"; }
 
-if [[ "${rc}" -eq 0 ]]; then
+if [[ "${rc}" -eq 0 && "${snapshot_ok}" -eq 1 ]]; then
   touch "${ARTIFACT_DIR}/.redaction-complete"
 elif [[ "${rc}" -eq 124 ]]; then
   echo "::warning::Log collection stopped after ${COLLECT_TIMEOUT_SECONDS}s" \
     "- the artifacts are incomplete and will not be uploaded"
+elif [[ "${snapshot_ok}" -eq 0 ]]; then
+  echo "::error::A secret file was not saved for the release gate" \
+    "- the artifacts will not be uploaded"
 fi

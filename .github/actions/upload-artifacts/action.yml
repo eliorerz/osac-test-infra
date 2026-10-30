@@ -198,6 +198,8 @@ runs:
         FAIL_ON_CENSOR: ${{ inputs.fail-on-censor }}
       run: |
         if [[ ! -d "${ARTIFACT_DIR}" ]]; then
+          # Nothing to censor, but the collection step may have saved copies of the secrets.
+          rm -rf "${RUNNER_TEMP}/osac-secret-inventory"
           exit 0
         fi
         args=()
@@ -249,3 +251,10 @@ runs:
           !${{ runner.temp }}/osac-artifacts/.redaction-complete
         retention-days: 7
         if-no-files-found: warn
+
+    # Every path above removes the snapshots, but a step that fails or is skipped before
+    # reaching its own cleanup must not leave copies of the secrets on the runner.
+    - name: Remove secret snapshots
+      if: always()
+      shell: bash
+      run: rm -rf "${RUNNER_TEMP}/osac-secret-inventory"

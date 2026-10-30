@@ -68,12 +68,18 @@ REPORT_NAME = "redaction-report.json"
 # appear in ordinary logs and are not secret.
 _IDENTITY_KEYS = {"email", "username", "user"}
 # Kubernetes Secret keys holding public material.
-_K8S_PUBLIC_KEYS = {
-    "ca.crt", "tls.crt", "ca-bundle.crt", "service-ca.crt", "namespace",
-    # Identifiers that sit next to a credential and show up in ordinary logs.
+_K8S_PUBLIC_KEYS = {"ca.crt", "tls.crt", "ca-bundle.crt", "service-ca.crt", "namespace"}
+# Identifiers that sit next to a credential and show up in ordinary logs. Their value is
+# left out of the inventory unless it carries a credential itself (see _CREDENTIAL_IN_TEXT).
+_K8S_IDENTITY_KEYS = {
     "user", "username", "user-id", "userid", "client-id", "client_id", "clientid", "email",
     "host", "hostname", "url", "endpoint", "region",
 }
+# A password in a URL, or a token-like query parameter.
+_CREDENTIAL_IN_TEXT = re.compile(
+    r"://[^/\s:@]+:[^/\s@]+@|[?&;](?:token|password|passwd|pwd|secret|key|apikey|api_key|access_key|sig|signature|auth)=[^&\s]+",
+    re.I,
+)
 
 _B64_CHARS = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/-_"
@@ -165,6 +171,8 @@ def needles_from_k8s_secrets(path: pathlib.Path) -> dict[bytes, str]:
         values.update({k: v for k, v in (item.get("stringData") or {}).items() if isinstance(v, str)})
         for key, text in values.items():
             if key.lower() in _K8S_PUBLIC_KEYS or text.startswith("-----BEGIN CERTIFICATE-----"):
+                continue
+            if key.lower() in _K8S_IDENTITY_KEYS and not _CREDENTIAL_IN_TEXT.search(text):
                 continue
             label = f"{prefix}/{key}"
             if text.lstrip().startswith(("{", "[")):
@@ -363,12 +371,17 @@ def _outside_markers(data: bytes, transform) -> bytes:
 
 def censor_bytes(data: bytes, patterns: Patterns) -> tuple[bytes, collections.Counter]:
     hits: collections.Counter = collections.Counter()
+    original = data
+    # Text in the artifact that merely looks like one of this gate's markers must not be
+    # trusted: _outside_markers would skip whatever sits inside it, and the survivor check
+    # would delete it. Only markers created below, after this rename, count.
+    data = data.replace(b"[REDACTED:", b"[REDACTED_INPUT:")
     for _round in range(3):
         before = data
         data = _outside_markers(data, lambda text: censor_shapes(censor_known(text, patterns, hits), hits))
         if data == before:
             break
-    return data, hits
+    return (data, hits) if hits else (original, hits)
 
 
 _ARCHIVE_MAGICS = (b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"PK\x03\x04", b"\x28\xb5\x2f\xfd", b"7z\xbc\xaf", b"Rar!")
