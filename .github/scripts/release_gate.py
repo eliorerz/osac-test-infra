@@ -80,7 +80,7 @@ _K8S_IDENTITY_KEYS = {
 # first / ? or #, so a port followed by a query string is not mistaken for user:password.
 _URL_USERINFO = re.compile(r"://[^/\s:@?#]+:([^/\s@?#]+)@")
 _CREDENTIAL_QUERY = re.compile(
-    r"[?&;](?:token|password|passwd|pwd|secret|key|apikey|api_key|access_key|sig|signature|auth)=([^&\s#]+)", re.I
+    r"[?&;](?:token|password|passwd|pwd|secret|key|apikey|api_key|access_key|sig|signature|auth)=([^&;\s#]+)", re.I
 )
 _MIN_URL_CREDENTIAL = 8
 
@@ -91,9 +91,14 @@ def _credential_bearing(text: str) -> bool:
 
 def _add_url_credentials(text: str, label: str, out: dict[bytes, str]) -> None:
     """The password and token values inside a URL, so a log that prints only one still matches."""
-    for regex in (_URL_USERINFO, _CREDENTIAL_QUERY):
+    # In userinfo a "+" is a plus sign; in a query string it is a space.
+    for regex, form_encoded in ((_URL_USERINFO, False), (_CREDENTIAL_QUERY, True)):
         for match in regex.finditer(text):
-            for value in {match.group(1), urllib.parse.unquote(match.group(1))}:
+            raw = match.group(1)
+            values = {raw, urllib.parse.unquote(raw)}
+            if form_encoded:
+                values.add(urllib.parse.unquote_plus(raw))
+            for value in values:
                 if len(value) >= _MIN_URL_CREDENTIAL:
                     out.setdefault(value.encode("utf-8", "surrogateescape"), f"{label}(url credential)")
 
@@ -326,11 +331,23 @@ class Patterns:
     """Known-value search patterns built once from the inventory."""
 
     def __init__(self, inventory: dict[bytes, str]) -> None:
+        ordered = sorted(inventory.items(), key=lambda kv: -len(kv[0]))
         self.items = [
-            (label, form, pattern, is_b64)
-            for needle, label in sorted(inventory.items(), key=lambda kv: -len(kv[0]))
+            (self._safe_label(label, inventory), form, pattern, is_b64)
+            for needle, label in ordered
             for form, pattern, is_b64 in variants(needle)
         ]
+
+    @staticmethod
+    def _safe_label(label: str, inventory: dict[bytes, str]) -> str:
+        """A marker label comes from object names (Secret, key), which can contain the very
+        value being hidden. The label ends up in the artifact and in the report, so any
+        inventory value found in it is replaced by a short hash."""
+        raw = label.encode("utf-8", "surrogateescape")
+        for needle in sorted(inventory, key=len, reverse=True):
+            if needle in raw:
+                raw = raw.replace(needle, f"(h-{fingerprint(needle)})".encode())
+        return raw.decode("utf-8", "surrogateescape")
 
     def present(self, data: bytes) -> list[str]:
         return sorted({label for label, _form, pattern, _b64 in self.items if pattern in data})
@@ -657,7 +674,12 @@ def main(argv: list[str]) -> int:
     _write_summary(report, args.check)
     if not args.check:
         report_path = pathlib.Path(args.report) if args.report else root / REPORT_NAME
-        report_path.write_text(json.dumps(report.as_json(), indent=2) + "\n", encoding="utf-8")
+        report_text = json.dumps(report.as_json(), indent=2) + "\n"
+        encoded_report = report_text.encode("utf-8", "surrogateescape")
+        if any(needle in encoded_report for needle in inventory):
+            print("release gate failed: the report would contain a secret value", file=sys.stderr)
+            return 2
+        report_path.write_text(report_text, encoding="utf-8")
     values = sum(int(s["values"]) for s in sources)
     print(f"Release gate: {len(report.censored)} censoring(s), {len(report.withheld)} file(s) withheld, "
           f"{values} known value(s) checked")

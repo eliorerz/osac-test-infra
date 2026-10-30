@@ -536,6 +536,36 @@ def test_url_credentials_are_inventoried_on_their_own() -> None:
             _assert(leaked not in text, f"{leaked[:6]}... was printed on its own and survived: {text!r}")
 
 
+def test_url_credentials_split_on_semicolons_and_decode_form_encoding() -> None:
+    with Fixture() as fx:
+        encode = lambda text: base64.b64encode(text.encode()).decode()
+        listing = fx.root.parent / "secrets.json"
+        listing.write_text(json.dumps({"items": [{"metadata": {"namespace": "ns", "name": "hooks"}, "data": {
+            "one": encode("https://h.example/x?token=Aa1Bb2Cc3Dd4;password=Zz9Yy8Xx7Ww6"),
+            "two": encode("https://h.example/y?password=long+secretValue99&x=1")}}]}))
+        path = fx.write("a.log", "second Zz9Yy8Xx7Ww6 alone\nfirst Aa1Bb2Cc3Dd4 alone\ndecoded long secretValue99 alone\n")
+        _run(fx.root, "--k8s-secrets", str(listing))
+        text = path.read_text()
+        for leaked in ("Zz9Yy8Xx7Ww6", "Aa1Bb2Cc3Dd4", "long secretValue99"):
+            _assert(leaked not in text, f"{leaked[:6]}... survived: {text!r}")
+
+
+def test_a_credential_never_ends_up_in_a_marker_label_or_the_report() -> None:
+    """A Secret named after its own credential must not put it into the published marker."""
+    with Fixture() as fx:
+        credential = "Zx9qL2mPa7vR4tY"
+        listing = fx.root.parent / "secrets.json"
+        listing.write_text(json.dumps({"items": [{"metadata": {"namespace": "ns", "name": f"db-{credential}"}, "data": {
+            "password": base64.b64encode(credential.encode()).decode(),
+            "url": base64.b64encode(f"postgres://svc:{credential}@db.example/app".encode()).decode()}}]}))
+        path = fx.write("a.log", f"login {credential}\n")
+        code, out, err = _run(fx.root, "--k8s-secrets", str(listing))
+        _assert(code == 0, f"run failed: {out}{err}")
+        published = path.read_text() + (fx.root / gate.REPORT_NAME).read_text() + out + err
+        _assert(credential not in published, f"the credential reached a marker, the report or the output: {published!r}")
+        _assert("(h-" in path.read_text(), "the label did not carry a hash in place of the credential")
+
+
 def main() -> None:
     test_incident_shape_is_censored_and_json_stays_valid()
     test_shape_rules_catch_it_without_any_known_value()
@@ -569,6 +599,8 @@ def main() -> None:
     test_credential_bearing_urls_in_cluster_secrets_are_censored()
     test_a_port_followed_by_a_query_is_not_a_password()
     test_url_credentials_are_inventoried_on_their_own()
+    test_url_credentials_split_on_semicolons_and_decode_form_encoding()
+    test_a_credential_never_ends_up_in_a_marker_label_or_the_report()
     print("release_gate_test.py: ok")
 
 
