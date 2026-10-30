@@ -449,6 +449,36 @@ def test_optional_secret_files_are_skipped_when_absent_or_empty() -> None:
         _assert(code == 2, "a named --secret-file with no value must still fail closed")
 
 
+def test_a_value_inside_its_own_marker_label_is_censored_not_withheld() -> None:
+    """Secret fulfillment-service-kafka holding the value fulfillment-service."""
+    with Fixture() as fx:
+        value = "fulfillment-service"
+        listing = fx.root.parent / "secrets.json"
+        listing.write_text(json.dumps({"items": [{"metadata": {"namespace": "ns", "name": "fulfillment-service-kafka"},
+                                                  "data": {"password": base64.b64encode(value.encode()).decode()}}]}))
+        path = fx.write("job.txt", f"connecting as {value} ok\nagain {value}\n")
+        code, _, _ = _run(fx.root, "--k8s-secrets", str(listing))
+        _assert(code == 0 and path.exists(), "a value that appears in its own marker label got the file withheld")
+        text = path.read_text()
+        _assert(text.count("[REDACTED:") == 2 and "[REDACTED:secret/ns/" in text, f"unexpected markers: {text!r}")
+        _assert("[REDACTED:secret/ns/[REDACTED" not in text, f"markers were nested: {text!r}")
+        _assert(not json.loads((fx.root / gate.REPORT_NAME).read_text())["withheld"], "the file was reported as withheld")
+
+
+def test_identity_keys_of_cluster_secrets_are_left_alone() -> None:
+    with Fixture() as fx:
+        listing = fx.root.parent / "secrets.json"
+        encode = lambda text: base64.b64encode(text.encode()).decode()
+        listing.write_text(json.dumps({"items": [{"metadata": {"namespace": "ns", "name": "kafka"}, "data": {
+            "user": encode("fulfillment-service"), "client-id": encode("osac-ui-backend-client"),
+            "password": encode("Zx9!qL2mPa7vR4tY")}}]}))
+        path = fx.write("a.log", "user fulfillment-service client osac-ui-backend-client password Zx9!qL2mPa7vR4tY\n")
+        _run(fx.root, "--k8s-secrets", str(listing))
+        text = path.read_text()
+        _assert("fulfillment-service" in text and "osac-ui-backend-client" in text, f"identity values were censored: {text!r}")
+        _assert("Zx9!qL2mPa7vR4tY" not in text, "the password was not censored")
+
+
 def main() -> None:
     test_incident_shape_is_censored_and_json_stays_valid()
     test_shape_rules_catch_it_without_any_known_value()
@@ -476,6 +506,8 @@ def main() -> None:
     test_decompression_bombs_are_abandoned_at_the_limit()
     test_zip_entries_with_unbounded_methods_are_refused()
     test_optional_secret_files_are_skipped_when_absent_or_empty()
+    test_a_value_inside_its_own_marker_label_is_censored_not_withheld()
+    test_identity_keys_of_cluster_secrets_are_left_alone()
     print("release_gate_test.py: ok")
 
 

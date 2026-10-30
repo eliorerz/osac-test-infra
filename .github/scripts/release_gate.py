@@ -68,7 +68,12 @@ REPORT_NAME = "redaction-report.json"
 # appear in ordinary logs and are not secret.
 _IDENTITY_KEYS = {"email", "username", "user"}
 # Kubernetes Secret keys holding public material.
-_K8S_PUBLIC_KEYS = {"ca.crt", "tls.crt", "ca-bundle.crt", "service-ca.crt", "namespace"}
+_K8S_PUBLIC_KEYS = {
+    "ca.crt", "tls.crt", "ca-bundle.crt", "service-ca.crt", "namespace",
+    # Identifiers that sit next to a credential and show up in ordinary logs.
+    "user", "username", "user-id", "userid", "client-id", "client_id", "clientid", "email",
+    "host", "hostname", "url", "endpoint", "region",
+}
 
 _B64_CHARS = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/-_"
@@ -159,7 +164,7 @@ def needles_from_k8s_secrets(path: pathlib.Path) -> dict[bytes, str]:
                 values[key] = decoded.decode(errors="replace")
         values.update({k: v for k, v in (item.get("stringData") or {}).items() if isinstance(v, str)})
         for key, text in values.items():
-            if key in _K8S_PUBLIC_KEYS or text.startswith("-----BEGIN CERTIFICATE-----"):
+            if key.lower() in _K8S_PUBLIC_KEYS or text.startswith("-----BEGIN CERTIFICATE-----"):
                 continue
             label = f"{prefix}/{key}"
             if text.lstrip().startswith(("{", "[")):
@@ -198,8 +203,12 @@ def fingerprint(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()[:10]
 
 
+_MARKER = re.compile(rb"\[REDACTED:[^\]]*\]")
+
+
 def _marker(name: str, suffix: str = "") -> bytes:
-    safe = re.sub(r"[^A-Za-z0-9._:/()\[\]-]", "_", name)
+    # No brackets in the label, so a marker always ends at its first closing bracket.
+    safe = re.sub(r"[^A-Za-z0-9._:/()-]", "_", name)
     return f"[REDACTED:{safe}{':' + suffix if suffix else ''}]".encode()
 
 
@@ -337,12 +346,26 @@ def censor_shapes(data: bytes, hits: collections.Counter) -> bytes:
     return data
 
 
+def _outside_markers(data: bytes, transform) -> bytes:
+    """Apply `transform` to the text between markers, leaving the markers themselves alone.
+
+    A marker's label names a secret and can contain the very value that was replaced
+    (a Secret called fulfillment-service-kafka holding the user fulfillment-service).
+    Searching inside markers would wrap them again on every round.
+    """
+    pieces, position = [], 0
+    for match in _MARKER.finditer(data):
+        pieces += [transform(data[position:match.start()]), match.group(0)]
+        position = match.end()
+    pieces.append(transform(data[position:]))
+    return b"".join(pieces)
+
+
 def censor_bytes(data: bytes, patterns: Patterns) -> tuple[bytes, collections.Counter]:
     hits: collections.Counter = collections.Counter()
     for _round in range(3):
         before = data
-        data = censor_known(data, patterns, hits)
-        data = censor_shapes(data, hits)
+        data = _outside_markers(data, lambda text: censor_shapes(censor_known(text, patterns, hits), hits))
         if data == before:
             break
     return data, hits
@@ -493,7 +516,7 @@ def process_directory(root: pathlib.Path, inventory: dict[bytes, str], check: bo
                     report.censored.append({"file": relative, "rule": rule, "count": count})
                 if check:
                     continue
-                survivors = patterns.present(cleaned)
+                survivors = patterns.present(_MARKER.sub(b"", cleaned))
                 if survivors:
                     path.unlink()
                     report.withheld.append(
