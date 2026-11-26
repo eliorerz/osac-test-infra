@@ -25,10 +25,14 @@ on:
         description: "OCI repository holding the published osac-chart umbrella chart"
         required: false
         default: "registry.redhat.io/cloud-extensions/osac-chart"
-      installer-ref:
-        description: "Branch/ref of the OSAC monorepo (Makefile/profile values only -- not the chart itself)"
+      test-ref:
+        description: "Git ref of the OSAC monorepo to take the e2e tests from. auto (default) picks release-X.Y for a chart X.Y.Z or X.Y.Z-rc.N, else main."
         required: false
-        default: "main"
+        default: "auto"
+      installer-ref:
+        description: "Branch/ref of the OSAC monorepo for the deploy step (Makefile/profile values and installer content, not the chart itself). auto (default) picks release-X.Y for a chart X.Y.Z or X.Y.Z-rc.N, else main."
+        required: false
+        default: "auto"
       installer-repo:
         description: "GitHub repo (owner/name) of the OSAC monorepo"
         required: false
@@ -83,7 +87,8 @@ jobs:
       test-marker: ${{ inputs.test-marker || 'not requires_caas and not requires_bmaas' }}
       chart-oci-repo: ${{ inputs.chart-oci-repo || 'registry.redhat.io/cloud-extensions/osac-chart' }}
       registry-environment: prod
-      installer-ref: ${{ inputs.installer-ref || 'main' }}
+      test-ref: ${{ inputs.test-ref || 'auto' }}
+      installer-ref: ${{ inputs.installer-ref || 'auto' }}
       installer-repo: ${{ inputs.installer-repo || 'osac-project/osac' }}
       image-overrides: ${{ inputs.image-overrides || '{}' }}
       runner-label: ${{ inputs.runner-label || 'osac-ci' }}

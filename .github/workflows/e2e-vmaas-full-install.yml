@@ -55,7 +55,10 @@ on:
         type: string
         default: "{}"
       installer-ref:
-        description: "Branch/ref of osac-installer to clone for the deploy step"
+        description: >-
+          Branch/ref of osac-installer to clone for the deploy step. "auto"
+          (only with chart-oci-repo) picks release-X.Y when the resolved chart
+          is X.Y.Z or X.Y.Z-rc.N and that branch exists, else main.
         required: false
         type: string
         default: "main"
@@ -175,7 +178,10 @@ on:
         type: string
         default: "osac-ci"
       test-ref:
-        description: "Git ref for the osac mono-repo test checkout"
+        description: >-
+          Git ref for the osac mono-repo test checkout. "auto" (only with
+          chart-oci-repo) picks release-X.Y when the resolved chart is X.Y.Z
+          or X.Y.Z-rc.N and that branch exists, else main.
         required: false
         type: string
         default: "main"
@@ -255,7 +261,9 @@ jobs:
       - name: Overlay tests from osac mono-repo
         id: overlay-tests
         env:
-          TEST_REF: ${{ inputs.test-ref }}
+          # "auto" is resolved after the chart version is known (see "Pick
+          # test and installer refs"); main is only the starting point.
+          TEST_REF: ${{ inputs.test-ref == 'auto' && 'main' || inputs.test-ref }}
           TEST_REPOSITORY: ${{ inputs.test-repository }}
         run: |
           if [[ ! "${TEST_REPOSITORY}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
@@ -764,6 +772,66 @@ jobs:
       # existing CLI fallback step below already extracts from
       # ghcr.io/osac-project/fulfillment-service:latest when OSAC_CLI_BIN
       # is still empty.
+      - name: Pick test and installer refs for the chart's release line
+        id: line-refs
+        if: inputs.chart-oci-repo != '' && (inputs.test-ref == 'auto' || inputs.installer-ref == 'auto')
+        env:
+          CHART_VERSION: ${{ steps.chart-version.outputs.version }}
+          TEST_REF_INPUT: ${{ inputs.test-ref }}
+          INSTALLER_REF_INPUT: ${{ inputs.installer-ref }}
+          TEST_REPOSITORY: ${{ inputs.test-repository }}
+          INSTALLER_REPO: ${{ inputs.installer-repo }}
+        run: |
+          set -euo pipefail
+          # The tests and the installer content must come from the release
+          # the chart was built from: main can be ahead of it (new tests, new
+          # playbooks), and then a healthy chart fails. Chart X.Y.Z or
+          # X.Y.Z-rc.N maps to branch release-X.Y; with no such branch
+          # (nightly or other versions) fall back to main.
+          for repo in "${TEST_REPOSITORY}" "${INSTALLER_REPO}"; do
+            if [[ ! "${repo}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::repository must be owner/name, got '${repo}'"
+              exit 1
+            fi
+          done
+          LINE_BRANCH=""
+          if [[ "${CHART_VERSION}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            LINE_BRANCH="release-${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          fi
+          pick_ref() {
+            local repo="$1" requested="$2"
+            if [[ "${requested}" != "auto" ]]; then
+              echo "${requested}"
+            elif [[ -n "${LINE_BRANCH}" ]] \
+                && git ls-remote --exit-code --heads "https://github.com/${repo}.git" "refs/heads/${LINE_BRANCH}" >/dev/null 2>&1; then
+              echo "${LINE_BRANCH}"
+            else
+              echo "main"
+            fi
+          }
+          TEST_REF="$(pick_ref "${TEST_REPOSITORY}" "${TEST_REF_INPUT}")"
+          INSTALLER_REF="$(pick_ref "${INSTALLER_REPO}" "${INSTALLER_REF_INPUT}")"
+          echo "Chart ${CHART_VERSION}: tests from ${TEST_REF}, installer from ${INSTALLER_REF}"
+          {
+            echo "### Refs for chart ${CHART_VERSION}"
+            echo "- tests: \`${TEST_REF}\`"
+            echo "- installer: \`${INSTALLER_REF}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "test-ref=${TEST_REF}" >> "$GITHUB_OUTPUT"
+          echo "installer-ref=${INSTALLER_REF}" >> "$GITHUB_OUTPUT"
+          if [[ "${TEST_REF_INPUT}" == "auto" && "${TEST_REF}" != "main" ]]; then
+            OSAC_CLONE_DIR="$RUNNER_TEMP/osac-test-source-line"
+            git init "$OSAC_CLONE_DIR"
+            git -C "$OSAC_CLONE_DIR" sparse-checkout init --cone
+            git -C "$OSAC_CLONE_DIR" sparse-checkout set tests
+            git -C "$OSAC_CLONE_DIR" fetch --depth 1 \
+              "https://github.com/${TEST_REPOSITORY}.git" "${TEST_REF}"
+            git -C "$OSAC_CLONE_DIR" checkout FETCH_HEAD
+            echo "test-sha=$(git -C "$OSAC_CLONE_DIR" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            rm -rf tests/
+            cp -r "$OSAC_CLONE_DIR/tests" ./tests
+          fi
+
       - name: Pull resolved chart and read its stamped image refs
         id: chart-images
         if: inputs.chart-oci-repo != '' && inputs.chart-oci-tag == ''
@@ -1016,7 +1084,7 @@ jobs:
         env:
           KUBECONFIG: ${{ runner.temp }}/kubeconfig
           INSTALLER_NAMESPACE: ${{ inputs.namespace }}
-          INSTALLER_REF: ${{ inputs.installer-ref }}
+          INSTALLER_REF: ${{ steps.line-refs.outputs.installer-ref || (inputs.installer-ref == 'auto' && 'main' || inputs.installer-ref) }}
           INSTALLER_REPO: ${{ inputs.installer-repo }}
         run: |
           set -o pipefail
@@ -1454,8 +1522,8 @@ jobs:
           suite: vmaas
           pr: ${{ inputs.pr-number }}
           # Requested refs stay distinct from immutable resolved SHAs.
-          test-ref: ${{ inputs.test-ref }}
-          test-sha: ${{ steps.overlay-tests.outputs.test-sha }}
+          test-ref: ${{ steps.line-refs.outputs.test-ref || (inputs.test-ref == 'auto' && 'main' || inputs.test-ref) }}
+          test-sha: ${{ steps.line-refs.outputs.test-sha || steps.overlay-tests.outputs.test-sha }}
           test-infra-ref: ${{ inputs.test-infra-ref }}
           test-infra-workflow-sha: ${{ job.workflow_sha }}
           test-suite: ${{ steps.resolve-test-suite.outputs.test-selection }}
