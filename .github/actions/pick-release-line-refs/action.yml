@@ -65,12 +65,28 @@ runs:
         if [[ "${CHART_VERSION}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
           LINE_BRANCH="release-${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
         fi
+        # Exit status 2 of "git ls-remote --exit-code" means "no such ref",
+        # the only case where falling back to main is right. Any other
+        # failure (network, GitHub, auth) is retried and then fails the job:
+        # guessing main there would test a release chart with main's content,
+        # which is the mismatch this action exists to prevent.
+        branch_exists() {
+          local repo="$1" attempt rc=0 err=""
+          for attempt in 1 2 3; do
+            err="$(git ls-remote --exit-code --heads "https://github.com/${repo}.git" "refs/heads/${LINE_BRANCH}" 2>&1 >/dev/null)" \
+              && return 0 || rc=$?
+            [[ "${rc}" -eq 2 ]] && return 1
+            echo "::warning::git ls-remote ${repo} ${LINE_BRANCH} failed (status ${rc}, attempt ${attempt}/3): ${err}" >&2
+            [[ "${attempt}" -lt 3 ]] && sleep $((attempt * 5))
+          done
+          echo "::error::Could not look up ${LINE_BRANCH} in ${repo} (status ${rc}): ${err}" >&2
+          exit 1
+        }
         pick_ref() {
           local repo="$1" requested="$2"
           if [[ "${requested}" != "auto" ]]; then
             echo "${requested}"
-          elif [[ -n "${LINE_BRANCH}" ]] \
-              && git ls-remote --exit-code --heads "https://github.com/${repo}.git" "refs/heads/${LINE_BRANCH}" >/dev/null 2>&1; then
+          elif [[ -n "${LINE_BRANCH}" ]] && branch_exists "${repo}"; then
             echo "${LINE_BRANCH}"
           else
             echo "main"

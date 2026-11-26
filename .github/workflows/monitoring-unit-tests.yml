@@ -2,16 +2,22 @@
 name: Monitoring unit tests
 
 # Unit tests for the Python scripts in monitoring/scripts
-# (workflow-exporter.py, post-ci-digest.py). A workflow of its own, so the
-# paths filter keeps it to pull requests that change those scripts, their
-# tests, or this file -- path filters apply per workflow, not per job. The
-# run fails when coverage of monitoring/scripts drops below 80%
-# (monitoring/tests/pytest.ini).
+# (workflow-exporter.py, post-ci-digest.py), and for the wiring of the
+# full-install workflows into the ci-observe capture. A workflow of its own,
+# so the paths filter keeps it to pull requests that change those scripts,
+# their tests, the workflow files and actions the tests read, or this file
+# -- path filters apply per workflow, not per job. The run fails when
+# coverage of monitoring/scripts drops below 80% (monitoring/tests/pytest.ini).
 on:
   pull_request:
     paths:
       - "monitoring/scripts/**"
       - "monitoring/tests/**"
+      - ".github/workflows/e2e-*-full-install.yml"
+      - ".github/workflows/e2e-*-full-install-caller.yml"
+      - ".github/workflows/e2e-pr-*.yml"
+      - ".github/actions/ci-observe-capture/**"
+      - ".github/actions/pick-release-line-refs/**"
       - ".github/workflows/monitoring-unit-tests.yml"
 
 permissions:

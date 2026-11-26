@@ -814,8 +814,20 @@ class TestWorkflowWiring:
         test-infra ref, the workflow file SHA and the recorded selection are
         five separate inputs."""
         observed = step_by_id(steps_of(workflow), "test-observed")
-        assert observed["with"]["test-ref"] == "${{ inputs.test-ref }}"
-        assert observed["with"]["test-sha"] == "${{ steps.overlay-tests.outputs.test-sha }}"
+        if "VMaaS" in workflow["name"]:
+            # The release-line step can replace the overlay's tests with a
+            # release branch's: what ran is its ref and commit when it picked
+            # one, and the overlay's otherwise (main, an explicit ref, or no
+            # chart). "auto" never reaches the capture as a ref.
+            assert observed["with"]["test-ref"] == (
+                "${{ steps.line-refs.outputs.test-ref || (inputs.test-ref == 'auto' && 'main' || inputs.test-ref) }}"
+            )
+            assert observed["with"]["test-sha"] == (
+                "${{ steps.line-refs.outputs.test-sha || steps.overlay-tests.outputs.test-sha }}"
+            )
+        else:
+            assert observed["with"]["test-ref"] == "${{ inputs.test-ref }}"
+            assert observed["with"]["test-sha"] == "${{ steps.overlay-tests.outputs.test-sha }}"
         assert observed["with"]["test-infra-ref"] == "${{ inputs.test-infra-ref }}"
         assert observed["with"]["test-infra-workflow-sha"] == "${{ job.workflow_sha }}"
         if "BMaaS" in workflow["name"]:
@@ -824,6 +836,29 @@ class TestWorkflowWiring:
             assert observed["with"]["test-suite"] == "${{ steps.resolve-test-suite.outputs.test-selection }}"
         assert observed["with"]["test-filter"] == "${{ inputs.test-filter }}"
         assert observed["with"]["test-marker"] == "${{ inputs.test-marker }}"
+
+    def test_the_release_line_refs_are_picked_before_anything_uses_tests(self, workflow: dict) -> None:
+        """VMaaS only: the chart's release line decides the tests and the
+        installer, so the step that picks them runs after the chart version is
+        resolved and before the test image is built, the installer is cloned
+        and the tests run. The first overlay starts from main when test-ref is
+        auto."""
+        if "VMaaS" not in workflow["name"]:
+            pytest.skip("only the VMaaS workflow installs a published chart")
+        steps = steps_of(workflow)
+        ids = [step.get("id") for step in steps]
+        names = [step.get("name") for step in steps]
+        picked = steps[ids.index("line-refs")]
+        assert picked["uses"] == "./.github/actions/pick-release-line-refs"
+        assert picked["with"]["chart-version"] == "${{ steps.chart-version.outputs.version }}"
+        assert ids.index("chart-version") < ids.index("line-refs")
+        assert ids.index("line-refs") < names.index("Build test image")
+        assert ids.index("line-refs") < names.index("Install infrastructure operators")
+        assert ids.index("line-refs") < ids.index("test-observed")
+        installer = steps[names.index("Install infrastructure operators")]
+        assert "steps.line-refs.outputs.installer-ref" in installer["env"]["INSTALLER_REF"]
+        overlay = steps[ids.index("overlay-tests")]
+        assert overlay["env"]["TEST_REF"] == "${{ inputs.test-ref == 'auto' && 'main' || inputs.test-ref }}"
 
     def test_the_overlay_step_reports_the_resolved_osac_commit(self, workflow: dict) -> None:
         """The overlay step is the only place that knows which commit of the
