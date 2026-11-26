@@ -1,0 +1,103 @@
+---
+name: Pick release-line refs
+description: >-
+  Choose the osac mono-repo refs for the e2e tests and the installer content
+  from the release the chart under test was built from. A chart X.Y.Z or
+  X.Y.Z-rc.N maps to branch release-X.Y when that branch exists, else main.
+  Main can be ahead of a published release (new tests, new playbooks), and a
+  healthy chart then fails tests it was never built for. Use it in any job
+  that installs a published chart (staging, production). When test-ref
+  resolves to a release branch, tests/ in the working directory is replaced
+  with that branch's tests.
+
+inputs:
+  chart-version:
+    description: "Resolved chart version, e.g. 0.4.0-rc.5"
+    required: true
+  test-ref:
+    description: "Requested test ref: auto, or an explicit ref that is kept as given"
+    required: false
+    default: "auto"
+  installer-ref:
+    description: "Requested installer ref: auto, or an explicit ref that is kept as given"
+    required: false
+    default: "auto"
+  test-repository:
+    description: "GitHub repo (owner/name) holding tests/"
+    required: false
+    default: "osac-project/osac"
+  installer-repo:
+    description: "GitHub repo (owner/name) holding the installer content"
+    required: false
+    default: "osac-project/osac"
+
+outputs:
+  test-ref:
+    description: "Effective test ref"
+    value: ${{ steps.pick.outputs.test-ref }}
+  test-sha:
+    description: "Commit of the tests overlaid by this action; empty when tests/ was left as it was"
+    value: ${{ steps.pick.outputs.test-sha }}
+  installer-ref:
+    description: "Effective installer ref"
+    value: ${{ steps.pick.outputs.installer-ref }}
+
+runs:
+  using: composite
+  steps:
+    - id: pick
+      shell: bash
+      env:
+        CHART_VERSION: ${{ inputs.chart-version }}
+        TEST_REF_INPUT: ${{ inputs.test-ref }}
+        INSTALLER_REF_INPUT: ${{ inputs.installer-ref }}
+        TEST_REPOSITORY: ${{ inputs.test-repository }}
+        INSTALLER_REPO: ${{ inputs.installer-repo }}
+      run: |
+        set -euo pipefail
+        for repo in "${TEST_REPOSITORY}" "${INSTALLER_REPO}"; do
+          if [[ ! "${repo}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::repository must be owner/name, got '${repo}'"
+            exit 1
+          fi
+        done
+        LINE_BRANCH=""
+        if [[ "${CHART_VERSION}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+          LINE_BRANCH="release-${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+        fi
+        pick_ref() {
+          local repo="$1" requested="$2"
+          if [[ "${requested}" != "auto" ]]; then
+            echo "${requested}"
+          elif [[ -n "${LINE_BRANCH}" ]] \
+              && git ls-remote --exit-code --heads "https://github.com/${repo}.git" "refs/heads/${LINE_BRANCH}" >/dev/null 2>&1; then
+            echo "${LINE_BRANCH}"
+          else
+            echo "main"
+          fi
+        }
+        TEST_REF="$(pick_ref "${TEST_REPOSITORY}" "${TEST_REF_INPUT}")"
+        INSTALLER_REF="$(pick_ref "${INSTALLER_REPO}" "${INSTALLER_REF_INPUT}")"
+        echo "Chart ${CHART_VERSION}: tests from ${TEST_REF}, installer from ${INSTALLER_REF}"
+        {
+          echo "### Refs for chart ${CHART_VERSION}"
+          echo "- tests: \`${TEST_REF}\`"
+          echo "- installer: \`${INSTALLER_REF}\`"
+        } >> "$GITHUB_STEP_SUMMARY"
+        echo "test-ref=${TEST_REF}" >> "$GITHUB_OUTPUT"
+        echo "installer-ref=${INSTALLER_REF}" >> "$GITHUB_OUTPUT"
+        TEST_SHA=""
+        if [[ "${TEST_REF_INPUT}" == "auto" && "${TEST_REF}" != "main" ]]; then
+          OSAC_CLONE_DIR="$RUNNER_TEMP/osac-test-source-line"
+          rm -rf "$OSAC_CLONE_DIR"
+          git init "$OSAC_CLONE_DIR"
+          git -C "$OSAC_CLONE_DIR" sparse-checkout init --cone
+          git -C "$OSAC_CLONE_DIR" sparse-checkout set tests
+          git -C "$OSAC_CLONE_DIR" fetch --depth 1 \
+            "https://github.com/${TEST_REPOSITORY}.git" "${TEST_REF}"
+          git -C "$OSAC_CLONE_DIR" checkout FETCH_HEAD
+          TEST_SHA="$(git -C "$OSAC_CLONE_DIR" rev-parse HEAD)"
+          rm -rf tests/
+          cp -r "$OSAC_CLONE_DIR/tests" ./tests
+        fi
+        echo "test-sha=${TEST_SHA}" >> "$GITHUB_OUTPUT"
